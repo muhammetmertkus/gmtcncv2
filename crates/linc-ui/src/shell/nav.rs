@@ -9,10 +9,10 @@ pub(super) fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Pag
     match page {
         Page::Machine => {
             // Hız Kadranı / Takometre Yayı + İbre (HTML Prototip ⏱)
-            let r = 7.0;
+            let r = 5.2;
             let start_angle = std::f32::consts::PI * 0.75; // 135 derece
             let end_angle = std::f32::consts::PI * 2.25;   // 405 derece
-            let steps = 14;
+            let steps = 12;
             let mut pts = Vec::with_capacity(steps + 1);
             for i in 0..=steps {
                 let a = start_angle + (end_angle - start_angle) * (i as f32 / steps as f32);
@@ -25,22 +25,22 @@ pub(super) fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Pag
             // Uç çentikleri
             let (s_sin, s_cos) = start_angle.sin_cos();
             painter.line_segment(
-                [egui::pos2(c.x + s_cos * (r - 2.0), c.y + s_sin * (r - 2.0)), egui::pos2(c.x + s_cos * r, c.y + s_sin * r)],
+                [egui::pos2(c.x + s_cos * (r - 1.5), c.y + s_sin * (r - 1.5)), egui::pos2(c.x + s_cos * r, c.y + s_sin * r)],
                 s,
             );
             let (e_sin, e_cos) = end_angle.sin_cos();
             painter.line_segment(
-                [egui::pos2(c.x + e_cos * (r - 2.0), c.y + e_sin * (r - 2.0)), egui::pos2(c.x + e_cos * r, c.y + e_sin * r)],
+                [egui::pos2(c.x + e_cos * (r - 1.5), c.y + e_sin * (r - 1.5)), egui::pos2(c.x + e_cos * r, c.y + e_sin * r)],
                 s,
             );
             // Sağ üste doğru ibre (~45 derece)
             let needle_angle = -std::f32::consts::FRAC_PI_4;
             let (n_sin, n_cos) = needle_angle.sin_cos();
             painter.line_segment(
-                [c, egui::pos2(c.x + n_cos * (r - 1.5), c.y + n_sin * (r - 1.5))],
-                egui::Stroke::new(1.8, color),
+                [c, egui::pos2(c.x + n_cos * (r - 1.2), c.y + n_sin * (r - 1.2))],
+                egui::Stroke::new(1.5, color),
             );
-            painter.circle_filled(c, 1.8, color);
+            painter.circle_filled(c, 1.4, color);
         }
         Page::Program => {
             // G-Kodu Doküman Sayfası (Kıvrımlı Köşe) + Sağ Alt Dişli Çark (Referans Görsel Birebir 📄⚙)
@@ -919,7 +919,7 @@ impl LincApp {
                         .strip_suffix(" Simulation")
                         .unwrap_or(&machine_name);
                     let (sim_rect, sim_resp) =
-                        ui.allocate_exact_size(Vec2::new(128.0, 22.0), Sense::CLICK);
+                        ui.allocate_exact_size(Vec2::new(134.0, 22.0), Sense::CLICK);
                     let sim_hovered = sim_resp.hovered();
                     ui.painter().rect_filled(
                         sim_rect,
@@ -966,7 +966,7 @@ impl LincApp {
                     );
                     // FPS
                     ui.painter().text(
-                        egui::pos2(sim_rect.right() - 11.0, sim_rect.center().y),
+                        egui::pos2(sim_rect.right() - 13.0, sim_rect.center().y),
                         Align2::RIGHT_CENTER,
                         format!("{:.0} FPS", fps_val),
                         FontId::monospace(theme::font_size(7.5)),
