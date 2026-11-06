@@ -469,8 +469,8 @@ impl LincApp {
                 Frame::new()
                     .fill(theme::COCKPIT_BG)
                     .stroke(Stroke::new(1.0, theme::COCKPIT_BORDER))
-                    .corner_radius(egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 })
-                    .inner_margin(Margin::symmetric(12, 4)),
+                    .corner_radius(egui::CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 })
+                    .inner_margin(Margin::symmetric(6, 3)),
             )
             .show(ui, |ui| self.draw_nav(ui));
         self.note_region("nav", nav.response.rect);
@@ -480,8 +480,8 @@ impl LincApp {
                 Frame::new()
                     .fill(Color32::from_rgba_unmultiplied(23, 31, 46, 120))
                     .stroke(Stroke::new(1.0, theme::COCKPIT_BORDER))
-                    .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: 14, se: 14 })
-                    .inner_margin(Margin::symmetric(12, 4)),
+                    .corner_radius(egui::CornerRadius { nw: 0, ne: 0, sw: 8, se: 8 })
+                    .inner_margin(Margin::symmetric(6, 3)),
             )
             .show(ui, |ui| self.top_bar(ui));
         self.note_region("top-bar", top_bar.response.rect);

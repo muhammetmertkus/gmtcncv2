@@ -39,12 +39,12 @@ pub(super) fn cockpit_capsule_custom<R>(
     let frame = egui::Frame::new()
         .fill(bg)
         .stroke(border_stroke)
-        .corner_radius(6)
-        .inner_margin(egui::Margin::symmetric(6, 2));
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(4, 2));
     let mut inner = None;
     let resp = frame.show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.spacing_mut().item_spacing.x = 2.5;
             inner = Some(add_contents(ui));
         });
     });
@@ -53,7 +53,7 @@ pub(super) fn cockpit_capsule_custom<R>(
     if interactive_resp.hovered() {
         ui.painter().rect_stroke(
             rect,
-            6,
+            4,
             egui::Stroke::new(1.0, theme::COCKPIT_BORDER_ACTIVE),
             egui::StrokeKind::Inside,
         );
@@ -86,7 +86,7 @@ impl LincApp {
                     .max_rect(top_rect)
                     .layout(Layout::right_to_left(Align::Center)),
             );
-            right_ui.spacing_mut().item_spacing.x = 6.0;
+            right_ui.spacing_mut().item_spacing.x = 4.0;
 
             // 1.1 Bildirim & Alarm Merkezi [MSG 4 | ALARM 2]
             let (messages, alarms) = self.log_counts();
@@ -110,18 +110,18 @@ impl LincApp {
                     ui.label(
                         RichText::new(format!("MSG {messages}"))
                             .monospace()
-                            .size(theme::font_size(9.0))
+                            .size(theme::font_size(8.0))
                             .color(if messages > 0 { theme::COCKPIT_TEXT_MAIN } else { theme::COCKPIT_TEXT_DIM }),
                     );
                     ui.label(
                         RichText::new("|")
-                            .size(9.0)
+                            .size(8.0)
                             .color(theme::COCKPIT_TEXT_DIM),
                     );
                     ui.label(
                         RichText::new(format!("ALARM {alarms}"))
                             .monospace()
-                            .size(theme::font_size(9.0))
+                            .size(theme::font_size(8.0))
                             .strong()
                             .color(if has_alarms { theme::COCKPIT_RED } else { theme::COCKPIT_TEXT_DIM }),
                     );
@@ -140,17 +140,17 @@ impl LincApp {
                         linc_core::model::AlarmSeverity::Info => theme::COCKPIT_TEXT_MUTED,
                     };
                     let text = linc_core::i18n::translate_cnc_message(&alarm.message);
-                    ui.label(RichText::new(format!("• {text}")).size(11.0).color(colour));
+                    ui.label(RichText::new(format!("• {text}")).size(10.0).color(colour));
                 }
             });
 
             // 1.2 Donanım Panel / MPG El Çarkı Bağlantı Hapı [🎛 ● PANEL]
             let online = !self.panel_offline();
             let (panel_resp, _) = cockpit_chip(&mut right_ui, |ui| {
-                let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                ui.painter().circle_filled(dot_rect.center(), 3.0, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED });
+                let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
+                ui.painter().circle_filled(dot_rect.center(), 2.5, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED });
 
-                ui.label(RichText::new("PANEL").monospace().size(theme::font_size(9.0)).strong().color(Color32::WHITE));
+                ui.label(RichText::new("PANEL").monospace().size(theme::font_size(8.0)).strong().color(Color32::WHITE));
             });
             panel_resp.on_hover_text(if online { "PANEL & EL ÇARKI (MPG) AKTİF" } else { "PANEL ÇEVRİMDIŞI" });
 
@@ -171,34 +171,36 @@ impl LincApp {
                     .layout(Layout::left_to_right(Align::Center)),
             );
             left_ui.set_clip_rect(left_constraint);
-            left_ui.spacing_mut().item_spacing.x = 5.0;
+            left_ui.spacing_mut().item_spacing.x = 3.5;
 
             let fits = |ui: &egui::Ui, approx_w: f32| -> bool {
                 ui.cursor().min.x + approx_w <= safe_right_limit
             };
 
             // 2.1 Mod Kapsülü [PANEL AUTO • TASK MANUAL ▾]
-            if fits(&left_ui, 120.0) {
-                let panel_mode_label = format!("PANEL {}", self.snapshot.panel.mode.label());
-                let task_mode_label = format!("TASK {}", self.snapshot.task.mode.label());
+            if fits(&left_ui, 80.0) {
+                let panel_mode_label = self.snapshot.panel.mode.label();
+                let task_mode_label = self.snapshot.task.mode.label();
                 let panel_valid = self.snapshot.panel.mode.is_valid();
                 let (mode_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                    ui.label(
-                        RichText::new(panel_mode_label)
-                            .monospace()
-                            .size(theme::font_size(9.0))
-                            .strong()
-                            .color(if panel_valid { theme::COCKPIT_CYAN } else { theme::COCKPIT_RED }),
-                    );
-                    ui.label(RichText::new("•").monospace().size(8.5).color(theme::COCKPIT_TEXT_DIM));
-                    ui.label(
-                        RichText::new(task_mode_label)
-                            .monospace()
-                            .size(theme::font_size(9.0))
-                            .strong()
-                            .color(theme::COCKPIT_TEXT_MAIN),
-                    );
-                    ui.label(RichText::new("▾").size(7.5).color(theme::COCKPIT_TEXT_DIM));
+                    if !panel_valid {
+                        ui.label(
+                            RichText::new("MOD: --")
+                                .monospace()
+                                .size(theme::font_size(8.0))
+                                .strong()
+                                .color(theme::COCKPIT_RED),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!("{panel_mode_label} • {task_mode_label}"))
+                                .monospace()
+                                .size(theme::font_size(8.0))
+                                .strong()
+                                .color(theme::COCKPIT_CYAN),
+                        );
+                    }
+                    ui.label(RichText::new("▾").size(6.5).color(theme::COCKPIT_TEXT_DIM));
                 });
                 mode_resp.on_hover_ui(|ui| {
                     ui.label(RichText::new("ÇALIŞMA MODU DETAYLARI").strong().color(theme::COCKPIT_CYAN));
@@ -208,15 +210,15 @@ impl LincApp {
             }
 
             // 2.2 Program Dosya Kapsülü [📄 PRG: gmt_parca.ngc]
-            if fits(&left_ui, 100.0) {
+            if fits(&left_ui, 70.0) {
                 let prog_label = self.program_label();
                 let (prog_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 12.0), Sense::hover());
-                    ui.painter().rect_stroke(icon_rect, 1.5, egui::Stroke::new(1.0, theme::COCKPIT_BLUE), StrokeKind::Inside);
-                    ui.painter().text(icon_rect.center(), Align2::CENTER_CENTER, "G", FontId::monospace(7.0), theme::COCKPIT_BLUE);
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(8.0, 10.0), Sense::hover());
+                    ui.painter().rect_stroke(icon_rect, 1.0, egui::Stroke::new(1.0, theme::COCKPIT_BLUE), StrokeKind::Inside);
+                    ui.painter().text(icon_rect.center(), Align2::CENTER_CENTER, "G", FontId::monospace(6.0), theme::COCKPIT_BLUE);
 
-                    ui.label(RichText::new("PRG:").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_TEXT_DIM));
-                    ui.label(RichText::new(&prog_label).monospace().size(theme::font_size(9.5)).strong().color(Color32::WHITE));
+                    ui.label(RichText::new("PRG:").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_TEXT_DIM));
+                    ui.label(RichText::new(&prog_label).monospace().size(theme::font_size(8.5)).strong().color(Color32::WHITE));
                 });
                 prog_resp.on_hover_ui(|ui| {
                     ui.label(RichText::new("AKTİF G-KODU PROGRAMI").strong().color(theme::ACCENT));
@@ -225,12 +227,12 @@ impl LincApp {
             }
 
             // 2.3 Durum Kapsülü [● STATE: ÇALIŞIYOR / IDLE / PAUSED]
-            if fits(&left_ui, 90.0) {
+            if fits(&left_ui, 60.0) {
                 let (state_word, state_color) = program_state_word(&self.snapshot.program);
                 let is_running = state_word.eq_ignore_ascii_case("running") || state_word.eq_ignore_ascii_case("çalışıyor");
                 let is_paused = state_word.eq_ignore_ascii_case("paused") || state_word.eq_ignore_ascii_case("beklemede");
                 let (state_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(6.0), Sense::hover());
                     let dot_color = if is_running {
                         theme::COCKPIT_GREEN
                     } else if is_paused {
@@ -238,18 +240,18 @@ impl LincApp {
                     } else {
                         theme::COCKPIT_TEXT_DIM
                     };
-                    ui.painter().circle_filled(dot_rect.center(), 3.0, dot_color);
+                    ui.painter().circle_filled(dot_rect.center(), 2.5, dot_color);
                     if is_running {
-                        ui.painter().circle_stroke(dot_rect.center(), 4.5, egui::Stroke::new(1.0, theme::tint(theme::COCKPIT_GREEN, 120)));
+                        ui.painter().circle_stroke(dot_rect.center(), 3.5, egui::Stroke::new(1.0, theme::tint(theme::COCKPIT_GREEN, 120)));
                     }
-                    ui.label(RichText::new("STATE:").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_TEXT_DIM));
-                    ui.label(RichText::new(state_word).monospace().size(theme::font_size(9.5)).strong().color(state_color));
+                    ui.label(RichText::new("STATE:").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_TEXT_DIM));
+                    ui.label(RichText::new(state_word).monospace().size(theme::font_size(8.5)).strong().color(state_color));
                 });
                 state_resp.on_hover_text("Tezgâh Durumu (IDLE / RUNNING / PAUSED)");
             }
 
             // 2.4 Takım Kapsülü [TOOL T1 Ф10]
-            if fits(&left_ui, 80.0) {
+            if fits(&left_ui, 55.0) {
                 let current_tool = self.snapshot.tool_change.current_tool;
                 let active_tool_row = self.snapshot.tool_table.rows.iter().find(|r| r.tool == current_tool).cloned();
                 let dia_str = active_tool_row
@@ -258,9 +260,9 @@ impl LincApp {
                     .map(|d| format!("Ф{:.1}", d))
                     .unwrap_or_else(|| "Ф--".into());
                 let (tool_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                    ui.label(RichText::new("TOOL").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_TEXT_DIM));
-                    ui.label(RichText::new(format!("T{current_tool}")).monospace().size(theme::font_size(9.5)).strong().color(theme::COCKPIT_GREEN));
-                    ui.label(RichText::new(dia_str).monospace().size(theme::font_size(8.5)).color(theme::COCKPIT_TEXT_MUTED));
+                    ui.label(RichText::new("TOOL").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_TEXT_DIM));
+                    ui.label(RichText::new(format!("T{current_tool}")).monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_GREEN));
+                    ui.label(RichText::new(dia_str).monospace().size(theme::font_size(7.5)).color(theme::COCKPIT_TEXT_MUTED));
                 });
                 tool_resp.on_hover_ui(|ui| {
                     ui.label(RichText::new("AKTİF SPINDLE TAKIMI").strong().color(theme::SUCCESS));
@@ -282,22 +284,22 @@ impl LincApp {
             }
 
             // 2.5 Spindle Devir Kapsülü [🗘 SPINDLE S 18.000 100% ▾]
-            if fits(&left_ui, 115.0) {
+            if fits(&left_ui, 85.0) {
                 let spindle_speed_text = self.snapshot.spindles.first()
                     .map(|spindle| format!("S {:.0}", spindle.actual_speed))
                     .unwrap_or_else(|| "S --".into());
                 let (spindle_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                    ui.painter().circle_stroke(icon_rect.center(), 3.5, egui::Stroke::new(1.0, theme::COCKPIT_AMBER));
-                    ui.painter().circle_filled(icon_rect.center(), 1.0, theme::COCKPIT_AMBER);
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter().circle_stroke(icon_rect.center(), 3.0, egui::Stroke::new(1.0, theme::COCKPIT_AMBER));
+                    ui.painter().circle_filled(icon_rect.center(), 0.8, theme::COCKPIT_AMBER);
 
-                    ui.label(RichText::new("SPINDLE").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_TEXT_DIM));
-                    ui.label(RichText::new(&spindle_speed_text).monospace().size(theme::font_size(9.5)).strong().color(theme::COCKPIT_AMBER));
+                    ui.label(RichText::new("SPINDLE").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_TEXT_DIM));
+                    ui.label(RichText::new(&spindle_speed_text).monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_AMBER));
 
-                    let (pct_rect, _) = ui.allocate_exact_size(Vec2::new(28.0, 14.0), Sense::hover());
-                    ui.painter().rect_filled(pct_rect, 3, Color32::from_rgba_unmultiplied(245, 158, 11, 35));
-                    ui.painter().text(pct_rect.center(), Align2::CENTER_CENTER, "100%", FontId::monospace(theme::font_size(7.5)), theme::COCKPIT_AMBER);
-                    ui.label(RichText::new("▾").size(7.5).color(theme::COCKPIT_TEXT_DIM));
+                    let (pct_rect, _) = ui.allocate_exact_size(Vec2::new(24.0, 12.0), Sense::hover());
+                    ui.painter().rect_filled(pct_rect, 2, Color32::from_rgba_unmultiplied(245, 158, 11, 35));
+                    ui.painter().text(pct_rect.center(), Align2::CENTER_CENTER, "100%", FontId::monospace(theme::font_size(7.0)), theme::COCKPIT_AMBER);
+                    ui.label(RichText::new("▾").size(6.5).color(theme::COCKPIT_TEXT_DIM));
                 });
                 spindle_resp.on_hover_ui(|ui| {
                     ui.label(RichText::new("SPINDLE DEVİR DURUMU").strong().color(theme::WARNING));
@@ -309,17 +311,17 @@ impl LincApp {
             }
 
             // 2.6 İlerleme Hızı Kapsülü [>> FEED F 1.200 100% ▾]
-            if fits(&left_ui, 110.0) {
+            if fits(&left_ui, 80.0) {
                 let feed_text = format!("F {:.0}", self.snapshot.feed.feed);
                 let (feed_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                    ui.label(RichText::new(">>").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_BLUE));
-                    ui.label(RichText::new("FEED").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_TEXT_DIM));
-                    ui.label(RichText::new(&feed_text).monospace().size(theme::font_size(9.5)).strong().color(theme::COCKPIT_BLUE));
+                    ui.label(RichText::new(">>").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_BLUE));
+                    ui.label(RichText::new("FEED").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_TEXT_DIM));
+                    ui.label(RichText::new(&feed_text).monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_BLUE));
 
-                    let (pct_rect, _) = ui.allocate_exact_size(Vec2::new(28.0, 14.0), Sense::hover());
-                    ui.painter().rect_filled(pct_rect, 3, Color32::from_rgba_unmultiplied(59, 130, 246, 35));
-                    ui.painter().text(pct_rect.center(), Align2::CENTER_CENTER, "100%", FontId::monospace(theme::font_size(7.5)), theme::COCKPIT_BLUE);
-                    ui.label(RichText::new("▾").size(7.5).color(theme::COCKPIT_TEXT_DIM));
+                    let (pct_rect, _) = ui.allocate_exact_size(Vec2::new(24.0, 12.0), Sense::hover());
+                    ui.painter().rect_filled(pct_rect, 2, Color32::from_rgba_unmultiplied(59, 130, 246, 35));
+                    ui.painter().text(pct_rect.center(), Align2::CENTER_CENTER, "100%", FontId::monospace(theme::font_size(7.0)), theme::COCKPIT_BLUE);
+                    ui.label(RichText::new("▾").size(6.5).color(theme::COCKPIT_TEXT_DIM));
                 });
                 feed_resp.on_hover_ui(|ui| {
                     ui.label(RichText::new("İLERLEME HIZI (FEED)").strong().color(theme::ACCENT));
@@ -328,17 +330,17 @@ impl LincApp {
             }
 
             // 2.7 İş Parçası Koordinat Kapsülü [WORK G54 ▾]
-            if fits(&left_ui, 75.0) {
+            if fits(&left_ui, 55.0) {
                 let wcs_text = self.active_wcs_label();
                 let (work_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                    ui.painter().circle_stroke(icon_rect.center(), 3.5, egui::Stroke::new(1.0, theme::COCKPIT_CYAN));
+                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter().circle_stroke(icon_rect.center(), 3.0, egui::Stroke::new(1.0, theme::COCKPIT_CYAN));
                     ui.painter().line_segment([egui::pos2(icon_rect.center().x, icon_rect.top()), egui::pos2(icon_rect.center().x, icon_rect.bottom())], egui::Stroke::new(1.0, theme::COCKPIT_CYAN));
                     ui.painter().line_segment([egui::pos2(icon_rect.left(), icon_rect.center().y), egui::pos2(icon_rect.right(), icon_rect.center().y)], egui::Stroke::new(1.0, theme::COCKPIT_CYAN));
 
-                    ui.label(RichText::new("WORK").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_TEXT_DIM));
-                    ui.label(RichText::new(&wcs_text).monospace().size(theme::font_size(9.5)).strong().color(theme::COCKPIT_CYAN));
-                    ui.label(RichText::new("▾").size(7.5).color(theme::COCKPIT_TEXT_DIM));
+                    ui.label(RichText::new("WORK").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_TEXT_DIM));
+                    ui.label(RichText::new(&wcs_text).monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_CYAN));
+                    ui.label(RichText::new("▾").size(6.5).color(theme::COCKPIT_TEXT_DIM));
                 });
                 work_resp.on_hover_ui(|ui| {
                     ui.label(RichText::new("İŞ PARÇASI KOORDİNAT SİSTEMİ (WCS)").strong().color(theme::ACCENT));
@@ -349,10 +351,10 @@ impl LincApp {
 
             // 2.8 Ağ Denetim Kapsülü [NET OFF]
             if let Some((network_word, network_color)) = network_metric(&self.snapshot) {
-                if fits(&left_ui, 60.0) {
+                if fits(&left_ui, 45.0) {
                     let (net_resp, _) = cockpit_chip(&mut left_ui, |ui| {
-                        ui.label(RichText::new("NET").monospace().size(theme::font_size(8.5)).strong().color(theme::COCKPIT_TEXT_DIM));
-                        ui.label(RichText::new(network_word).monospace().size(theme::font_size(9.0)).strong().color(network_color));
+                        ui.label(RichText::new("NET").monospace().size(theme::font_size(7.5)).strong().color(theme::COCKPIT_TEXT_DIM));
+                        ui.label(RichText::new(network_word).monospace().size(theme::font_size(8.0)).strong().color(network_color));
                     });
                     net_resp.on_hover_ui(|ui| {
                         ui.label(RichText::new("HARİCİ AĞ DENETİMİ (NET)").strong().color(theme::MUTED));
@@ -614,65 +616,65 @@ impl LincApp {
     }
 
     pub(super) fn status_badges(&mut self, ui: &mut egui::Ui) {
-        let size = theme::font_size(10.0);
+        let size = theme::font_size(8.5);
         if self.snapshot.limits_overridden {
             let label = linc_core::i18n::t("shell.badges.limits_override");
             let tooltip = linc_core::i18n::t("shell.badges.limits_override_tooltip");
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(84.0, 26.0), Sense::hover());
-            ui.painter().rect_filled(rect, 8, Color32::from_rgba_unmultiplied(245, 158, 11, 40));
-            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(10.5)), theme::COCKPIT_AMBER);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(72.0, 22.0), Sense::hover());
+            ui.painter().rect_filled(rect, 5, Color32::from_rgba_unmultiplied(245, 158, 11, 40));
+            ui.painter().rect_stroke(rect, 5, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(8.5)), theme::COCKPIT_AMBER);
             resp.on_hover_text(tooltip);
         }
         if self.snapshot.machine.estop {
             let label = linc_core::i18n::t("shell.badges.estop");
             let tooltip = linc_core::i18n::t("shell.badges.estop_tooltip");
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(78.0, 26.0), Sense::hover());
-            ui.painter().rect_filled(rect, 8, theme::COCKPIT_RED);
-            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, Color32::from_rgb(0xf8, 0x71, 0x71)), StrokeKind::Inside);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(68.0, 22.0), Sense::hover());
+            ui.painter().rect_filled(rect, 5, theme::COCKPIT_RED);
+            ui.painter().rect_stroke(rect, 5, Stroke::new(1.0, Color32::from_rgb(0xf8, 0x71, 0x71)), StrokeKind::Inside);
             // Draw mini mushroom stop icon
             let c = rect.center();
-            let icon_c = egui::pos2(rect.left() + 15.0, c.y);
-            ui.painter().circle_filled(egui::pos2(icon_c.x, icon_c.y - 3.0), 4.0, Color32::WHITE);
-            ui.painter().rect_filled(egui::Rect::from_center_size(egui::pos2(icon_c.x, icon_c.y + 2.0), Vec2::new(4.0, 4.0)), 1, Color32::WHITE);
-            ui.painter().rect_filled(egui::Rect::from_center_size(egui::pos2(icon_c.x, icon_c.y + 5.0), Vec2::new(8.0, 2.0)), 1, Color32::WHITE);
-            ui.painter().text(egui::pos2(rect.left() + 46.0, c.y), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(11.0)), Color32::WHITE);
+            let icon_c = egui::pos2(rect.left() + 12.0, c.y);
+            ui.painter().circle_filled(egui::pos2(icon_c.x, icon_c.y - 3.0), 3.5, Color32::WHITE);
+            ui.painter().rect_filled(egui::Rect::from_center_size(egui::pos2(icon_c.x, icon_c.y + 2.0), Vec2::new(3.5, 3.5)), 1, Color32::WHITE);
+            ui.painter().rect_filled(egui::Rect::from_center_size(egui::pos2(icon_c.x, icon_c.y + 4.5), Vec2::new(7.0, 1.8)), 1, Color32::WHITE);
+            ui.painter().text(egui::pos2(rect.left() + 40.0, c.y), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(9.0)), Color32::WHITE);
             resp.on_hover_text(tooltip);
         }
         if let Some(fault) = self.snapshot.probe_trip.clone() {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             let label = linc_core::i18n::t("shell.badges.probe_trip");
             let trip_desc = probe_trip_banner_text(&fault);
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(88.0, 26.0), Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(76.0, 22.0), Sense::click());
             let bg = if resp.hovered() { Color32::from_rgb(255, 80, 80) } else { theme::COCKPIT_RED };
-            ui.painter().rect_filled(rect, 8, bg);
-            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, Color32::from_rgb(255, 150, 150)), StrokeKind::Inside);
+            ui.painter().rect_filled(rect, 5, bg);
+            ui.painter().rect_stroke(rect, 5, Stroke::new(1.0, Color32::from_rgb(255, 150, 150)), StrokeKind::Inside);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::WHITE);
             if resp.clicked() {
                 self.clear_probe_trip();
             }
             resp.on_hover_ui(|ui| {
                 ui.label(RichText::new(linc_core::i18n::t("shell.badges.probe_trip_tooltip")).strong().color(theme::COCKPIT_RED));
-                ui.label(RichText::new(trip_desc).size(11.0));
-                ui.label(RichText::new("Sıfırlamak için tıklayın").size(10.0).color(theme::COCKPIT_TEXT_MUTED));
+                ui.label(RichText::new(trip_desc).size(10.0));
+                ui.label(RichText::new("Sıfırlamak için tıklayın").size(9.0).color(theme::COCKPIT_TEXT_MUTED));
             });
         }
         if self.panel_offline() {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             let label = linc_core::i18n::t("shell.badges.panel_offline");
             let tooltip = linc_core::i18n::t("shell.badges.panel_offline_tooltip");
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(90.0, 26.0), Sense::hover());
-            ui.painter().rect_filled(rect, 8, theme::COCKPIT_RED);
-            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, Color32::from_rgb(255, 120, 120)), StrokeKind::Inside);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(76.0, 22.0), Sense::hover());
+            ui.painter().rect_filled(rect, 5, theme::COCKPIT_RED);
+            ui.painter().rect_stroke(rect, 5, Stroke::new(1.0, Color32::from_rgb(255, 120, 120)), StrokeKind::Inside);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::WHITE);
             resp.on_hover_text(tooltip);
         } else if self.invalid_mode() {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             let label = linc_core::i18n::t("shell.badges.panel_invalid");
             let tooltip = linc_core::i18n::t("shell.badges.panel_invalid_tooltip");
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(80.0, 26.0), Sense::hover());
-            ui.painter().rect_filled(rect, 8, theme::COCKPIT_RED);
-            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, Color32::from_rgb(255, 120, 120)), StrokeKind::Inside);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(70.0, 22.0), Sense::hover());
+            ui.painter().rect_filled(rect, 5, theme::COCKPIT_RED);
+            ui.painter().rect_stroke(rect, 5, Stroke::new(1.0, Color32::from_rgb(255, 120, 120)), StrokeKind::Inside);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::WHITE);
             resp.on_hover_text(tooltip);
         }
@@ -682,12 +684,12 @@ impl LincApp {
                 Page::Program | Page::Offsets | Page::Tools | Page::Probe | Page::Files
             )
         {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             let label = linc_core::i18n::t("shell.badges.protect");
             let tooltip = linc_core::i18n::t("shell.badges.protect_tooltip");
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(56.0, 26.0), Sense::hover());
-            ui.painter().rect_filled(rect, 8, Color32::from_rgba_unmultiplied(245, 158, 11, 40));
-            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(50.0, 22.0), Sense::hover());
+            ui.painter().rect_filled(rect, 5, Color32::from_rgba_unmultiplied(245, 158, 11, 40));
+            ui.painter().rect_stroke(rect, 5, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), theme::COCKPIT_AMBER);
             resp.on_hover_text(tooltip);
         }

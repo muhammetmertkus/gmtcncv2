@@ -53,14 +53,14 @@ pub const LINE_NUMBER: Color32 = Color32::from_rgb(0x6b, 0x72, 0x80);
 /// markers rather than strokes.
 pub const MDI_PREVIEW: Color32 = C3;
 
-pub const TOP_BAR_HEIGHT: f32 = 48.0;
+pub const TOP_BAR_HEIGHT: f32 = 38.0;
 /// A single read-only status line: one text row plus a small frame margin.
 /// It carries no buttons, so it does not need a target-sized row.
 pub const BOTTOM_BAR_HEIGHT: f32 = 36.0;
 pub const STATUS_LINE_HEIGHT: f32 = 20.0;
 pub const NAV_WIDTH: f32 = 172.0;
 /// Height of the horizontal navigation targets.
-pub const NAV_BAR_HEIGHT: f32 = 48.0;
+pub const NAV_BAR_HEIGHT: f32 = 40.0;
 pub const MIN_TARGET: f32 = 44.0;
 /// Gap between two navigation rows.
 ///

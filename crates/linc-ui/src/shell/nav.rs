@@ -641,7 +641,7 @@ impl LincApp {
         // egui 0.37 Sides layout: guarantees the right system cluster is sized first,
         // and left navigation tabs take the remaining bounded area with zero overlapping.
         egui::containers::Sides::new()
-            .height(30.0)
+            .height(32.0)
             .shrink_left()
             .show(
                 ui,
@@ -652,7 +652,7 @@ impl LincApp {
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
+                                ui.spacing_mut().item_spacing.x = 4.0;
                                 for (index, page) in nav_pages.iter().enumerate() {
                                     let Some((_, label, keycap_hint)) =
                                         NAV_ITEMS.iter().find(|(entry, _, _)| entry == page)
@@ -703,16 +703,16 @@ impl LincApp {
                                     let frame = egui::Frame::new()
                                         .fill(card_bg)
                                         .stroke(Stroke::new(1.0, card_border))
-                                        .corner_radius(8)
-                                        .inner_margin(egui::Margin::symmetric(8, 4));
+                                        .corner_radius(5)
+                                        .inner_margin(egui::Margin::symmetric(5, 2));
 
                                     let frame_resp = frame.show(ui, |ui| {
                                         ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            ui.spacing_mut().item_spacing.x = 3.5;
 
                                             // 1. Vector Icon
                                             let (icon_rect, _) = ui.allocate_exact_size(
-                                                Vec2::splat(16.0),
+                                                Vec2::splat(13.0),
                                                 Sense::hover(),
                                             );
                                             draw_nav_icon(ui.painter(), icon_rect, *page, icon_color);
@@ -720,7 +720,7 @@ impl LincApp {
                                             // 2. Tab Label (native egui layout prevents any text collision)
                                             ui.label(
                                                 RichText::new(*label)
-                                                    .size(theme::font_size(10.5))
+                                                    .size(theme::font_size(8.5))
                                                     .strong()
                                                     .color(label_color),
                                             );
@@ -729,13 +729,13 @@ impl LincApp {
                                             if selected {
                                                 egui::Frame::new()
                                                     .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 45))
-                                                    .corner_radius(4)
-                                                    .inner_margin(egui::Margin::symmetric(4, 1))
+                                                    .corner_radius(3)
+                                                    .inner_margin(egui::Margin::symmetric(3, 1))
                                                     .show(ui, |ui| {
                                                         ui.label(
                                                             RichText::new(&keycap)
                                                                 .monospace()
-                                                                .size(theme::font_size(8.5))
+                                                                .size(theme::font_size(7.5))
                                                                 .color(Color32::WHITE),
                                                         );
                                                     });
@@ -743,13 +743,13 @@ impl LincApp {
                                                 egui::Frame::new()
                                                     .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 12))
                                                     .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 25)))
-                                                    .corner_radius(4)
-                                                    .inner_margin(egui::Margin::symmetric(4, 1))
+                                                    .corner_radius(3)
+                                                    .inner_margin(egui::Margin::symmetric(3, 1))
                                                     .show(ui, |ui| {
                                                         ui.label(
                                                             RichText::new(&keycap)
                                                                 .monospace()
-                                                                .size(theme::font_size(8.0))
+                                                                .size(theme::font_size(7.0))
                                                                 .color(theme::COCKPIT_TEXT_DIM),
                                                         );
                                                     });
@@ -765,12 +765,12 @@ impl LincApp {
                                     if btn_resp.hovered() && !selected {
                                         ui.painter().rect_stroke(
                                             frame_resp.response.rect,
-                                            8,
+                                            5,
                                             Stroke::new(1.0, theme::COCKPIT_BORDER_ACTIVE),
                                             StrokeKind::Inside,
                                         );
                                     }
-                                    if btn_resp.clicked() {
+                                    if btn_resp.clicked_by(egui::PointerButton::Primary) {
                                         nav_action = Some((index, *page));
                                     }
                                 }
@@ -779,42 +779,42 @@ impl LincApp {
                 },
                 |ui| {
                     // RIGHT: System Cluster (Right to Left in SidesKind::ShrinkLeft)
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.x = 4.0;
 
                     // 1. Canlı Saat (Digital Cockpit Clock)
                     ui.label(
                         RichText::new(format_clock(now_ms()))
                             .monospace()
-                            .size(theme::font_size(11.5))
+                            .size(theme::font_size(9.5))
                             .strong()
                             .color(theme::COCKPIT_TEXT_MAIN),
                     );
 
                     // Ayırıcı çizgi
-                    let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 18.0), Sense::hover());
+                    let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 14.0), Sense::hover());
                     ui.painter().line_segment(
                         [egui::pos2(sep_rect.center().x, sep_rect.top()), egui::pos2(sep_rect.center().x, sep_rect.bottom())],
                         Stroke::new(1.0, theme::COCKPIT_BORDER),
                     );
 
                     // 2. Dil Seçici Kapsülü ([TR] / [EN])
-                    let (lang_rect, _) = ui.allocate_exact_size(Vec2::new(56.0, 26.0), Sense::hover());
-                    ui.painter().rect_filled(lang_rect, 6, theme::COCKPIT_CARD);
-                    ui.painter().rect_stroke(lang_rect, 6, Stroke::new(1.0, theme::COCKPIT_BORDER), StrokeKind::Inside);
+                    let (lang_rect, _) = ui.allocate_exact_size(Vec2::new(44.0, 20.0), Sense::hover());
+                    ui.painter().rect_filled(lang_rect, 4, theme::COCKPIT_CARD);
+                    ui.painter().rect_stroke(lang_rect, 4, Stroke::new(1.0, theme::COCKPIT_BORDER), StrokeKind::Inside);
 
-                    let tr_rect = egui::Rect::from_min_max(lang_rect.min + egui::vec2(1.5, 1.5), egui::pos2(lang_rect.center().x - 0.5, lang_rect.max.y - 1.5));
-                    let en_rect = egui::Rect::from_min_max(egui::pos2(lang_rect.center().x + 0.5, lang_rect.min.y + 1.5), lang_rect.max - egui::vec2(1.5, 1.5));
+                    let tr_rect = egui::Rect::from_min_max(lang_rect.min + egui::vec2(1.0, 1.0), egui::pos2(lang_rect.center().x - 0.5, lang_rect.max.y - 1.0));
+                    let en_rect = egui::Rect::from_min_max(egui::pos2(lang_rect.center().x + 0.5, lang_rect.min.y + 1.0), lang_rect.max - egui::vec2(1.0, 1.0));
 
                     let tr_resp = ui.interact(tr_rect, ui.scope_id().with("nav-btn-tr"), Sense::CLICK);
                     if tr_resp.clicked() {
                         linc_core::i18n::set_locale(linc_core::i18n::Locale::Tr);
                     }
-                    ui.painter().rect_filled(tr_rect, 4, if tr_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
+                    ui.painter().rect_filled(tr_rect, 3, if tr_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
                     ui.painter().text(
                         tr_rect.center(),
                         Align2::CENTER_CENTER,
                         "TR",
-                        FontId::monospace(theme::font_size(9.0)),
+                        FontId::monospace(theme::font_size(8.0)),
                         if tr_active { Color32::WHITE } else { theme::COCKPIT_TEXT_DIM },
                     );
 
@@ -822,46 +822,46 @@ impl LincApp {
                     if en_resp.clicked() {
                         linc_core::i18n::set_locale(linc_core::i18n::Locale::En);
                     }
-                    ui.painter().rect_filled(en_rect, 4, if en_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
+                    ui.painter().rect_filled(en_rect, 3, if en_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
                     ui.painter().text(
                         en_rect.center(),
                         Align2::CENTER_CENTER,
                         "EN",
-                        FontId::monospace(theme::font_size(9.0)),
+                        FontId::monospace(theme::font_size(8.0)),
                         if en_active { Color32::WHITE } else { theme::COCKPIT_TEXT_DIM },
                     );
 
                     // 3. Birleşik Kılavuz, Kısayollar ve G-Code Yardım Menüsü
                     let (menu_rect, menu_response) =
-                        ui.allocate_exact_size(Vec2::new(115.0, 26.0), Sense::CLICK);
+                        ui.allocate_exact_size(Vec2::new(88.0, 20.0), Sense::CLICK);
                     let menu_hovered = menu_response.hovered();
                     ui.painter().rect_filled(
                         menu_rect,
-                        6,
+                        4,
                         if menu_hovered { theme::COCKPIT_CARD_HOVER } else { theme::COCKPIT_CARD },
                     );
                     ui.painter().rect_stroke(
                         menu_rect,
-                        6,
+                        4,
                         Stroke::new(1.0, if menu_hovered { theme::COCKPIT_BORDER_ACTIVE } else { theme::COCKPIT_BORDER }),
                         StrokeKind::Inside,
                     );
                     // (?) Soru İkonu
-                    let q_c = egui::pos2(menu_rect.left() + 13.0, menu_rect.center().y);
-                    ui.painter().circle_stroke(q_c, 5.5, Stroke::new(1.2, theme::COCKPIT_CYAN));
+                    let q_c = egui::pos2(menu_rect.left() + 10.0, menu_rect.center().y);
+                    ui.painter().circle_stroke(q_c, 4.5, Stroke::new(1.1, theme::COCKPIT_CYAN));
                     ui.painter().text(
                         egui::pos2(q_c.x, q_c.y - 0.5),
                         Align2::CENTER_CENTER,
                         "?",
-                        FontId::proportional(theme::font_size(9.0)),
+                        FontId::proportional(theme::font_size(8.0)),
                         theme::COCKPIT_CYAN,
                     );
                     let help_label = if tr_active { "YARDIM ▾" } else { "SHORTCUTS ▾" };
                     ui.painter().text(
-                        egui::pos2(menu_rect.left() + 24.0, menu_rect.center().y),
+                        egui::pos2(menu_rect.left() + 18.0, menu_rect.center().y),
                         Align2::LEFT_CENTER,
                         help_label,
-                        FontId::proportional(theme::font_size(10.0)),
+                        FontId::proportional(theme::font_size(8.5)),
                         theme::COCKPIT_TEXT_MAIN,
                     );
                     egui::Popup::menu(&menu_response).show(|ui| {
@@ -919,23 +919,23 @@ impl LincApp {
                         .strip_suffix(" Simulation")
                         .unwrap_or(&machine_name);
                     let (sim_rect, sim_resp) =
-                        ui.allocate_exact_size(Vec2::new(165.0, 26.0), Sense::CLICK);
+                        ui.allocate_exact_size(Vec2::new(128.0, 22.0), Sense::CLICK);
                     let sim_hovered = sim_resp.hovered();
                     ui.painter().rect_filled(
                         sim_rect,
-                        6,
+                        4,
                         if sim_hovered { theme::COCKPIT_CARD_HOVER } else { theme::COCKPIT_CARD },
                     );
                     ui.painter().rect_stroke(
                         sim_rect,
-                        6,
+                        4,
                         Stroke::new(1.0, if sim_hovered { theme::COCKPIT_AMBER } else { theme::COCKPIT_BORDER }),
                         StrokeKind::Inside,
                     );
                     // Amber SIM chip
                     let sim_pill_rect = egui::Rect::from_center_size(
-                        egui::pos2(sim_rect.left() + 18.0, sim_rect.center().y),
-                        Vec2::new(28.0, 16.0),
+                        egui::pos2(sim_rect.left() + 16.0, sim_rect.center().y),
+                        Vec2::new(26.0, 14.0),
                     );
                     let sim_bg = if is_open {
                         theme::COCKPIT_AMBER
@@ -947,37 +947,37 @@ impl LincApp {
                     } else {
                         theme::COCKPIT_AMBER
                     };
-                    ui.painter().rect_filled(sim_pill_rect, 4, sim_bg);
-                    ui.painter().rect_stroke(sim_pill_rect, 4, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
+                    ui.painter().rect_filled(sim_pill_rect, 3, sim_bg);
+                    ui.painter().rect_stroke(sim_pill_rect, 3, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
                     ui.painter().text(
                         sim_pill_rect.center(),
                         Align2::CENTER_CENTER,
                         if is_open { "SIM ◨" } else { "SIM ◧" },
-                        FontId::monospace(theme::font_size(8.0)),
+                        FontId::monospace(theme::font_size(7.5)),
                         sim_fg,
                     );
                     // Machine name (no overlap with FPS)
                     ui.painter().text(
-                        egui::pos2(sim_rect.left() + 36.0, sim_rect.center().y),
+                        egui::pos2(sim_rect.left() + 32.0, sim_rect.center().y),
                         Align2::LEFT_CENTER,
                         clean_name,
-                        FontId::proportional(theme::font_size(10.0)),
+                        FontId::proportional(theme::font_size(8.5)),
                         Color32::WHITE,
                     );
                     // FPS
                     ui.painter().text(
-                        egui::pos2(sim_rect.right() - 14.0, sim_rect.center().y),
+                        egui::pos2(sim_rect.right() - 11.0, sim_rect.center().y),
                         Align2::RIGHT_CENTER,
                         format!("{:.0} FPS", fps_val),
-                        FontId::monospace(theme::font_size(8.5)),
+                        FontId::monospace(theme::font_size(7.5)),
                         theme::COCKPIT_TEXT_DIM,
                     );
                     // Arrow
                     ui.painter().text(
-                        egui::pos2(sim_rect.right() - 6.0, sim_rect.center().y),
+                        egui::pos2(sim_rect.right() - 5.0, sim_rect.center().y),
                         Align2::CENTER_CENTER,
                         "▾",
-                        FontId::monospace(theme::font_size(8.0)),
+                        FontId::monospace(theme::font_size(6.5)),
                         theme::COCKPIT_TEXT_DIM,
                     );
                     if sim_resp.clicked() && is_sim {
