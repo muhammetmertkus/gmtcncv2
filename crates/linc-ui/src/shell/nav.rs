@@ -200,6 +200,7 @@ pub const NAV_ITEMS: [(Page, &str, &str); 6] = [
 /// OFFSETS row prints `PROBE` on the panel, but `PROBE · F8` is too wide for
 /// the pill, so its PC legend abbreviates to `OFFS · F8`. DIAG and G-CODE
 /// already print their chords and are left alone either way.
+#[allow(dead_code)]
 fn nav_keycap(app: &LincApp, page: Page, panel: &str) -> String {
     if !app.pc_keyboard() {
         return panel.to_string();
@@ -615,350 +616,594 @@ impl LincApp {
 
     pub(super) fn draw_nav(&mut self, ui: &mut egui::Ui) {
         let shortcuts = self.key_hints();
-        // Reserve the right edge for the system cluster; navigation can scroll on narrow windows.
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+        let cur_loc = linc_core::i18n::current_locale();
+        let tr_active = cur_loc == linc_core::i18n::Locale::Tr;
+        let en_active = cur_loc == linc_core::i18n::Locale::En;
+        let is_sim = self.is_sim();
+        let is_open = self.sim_panel_should_show();
+        let machine_name = self.profile.config.machine.name.clone();
+        let fps_val = self.fps;
 
-            // 1. Canlı Saat (Digital Cockpit Clock)
+        let nav_pages = self.nav.pages.clone();
+        let current_page = self.nav.page;
+        let nav_focus = self.nav.nav_focus;
+        let focus_nav = self.nav.focus_region == FocusRegion::Nav;
+        let pc_keyboard = self.pc_keyboard();
+        let km_machine = self.prefs.keymap.machine.label().to_string();
+        let km_prog = self.prefs.keymap.program.label().to_string();
+        let km_tools = self.prefs.keymap.tools.label().to_string();
+        let km_offsets = self.prefs.keymap.offsets.label().to_string();
+
+        let mut nav_action: Option<(usize, Page)> = None;
+        let mut sim_toggle = false;
+        let mut open_help_doc = false;
+
+        // egui 0.37 Sides layout: guarantees the right system cluster is sized first,
+        // and left navigation tabs take the remaining bounded area with zero overlapping.
+        egui::containers::Sides::new()
+            .height(30.0)
+            .shrink_left()
+            .show(
+                ui,
+                |ui| {
+                    // LEFT: Single-line Industrial Navigation Tabs
+                    egui::ScrollArea::horizontal()
+                        .id_salt("navigation-tabs")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                for (index, page) in nav_pages.iter().enumerate() {
+                                    let Some((_, label, keycap_hint)) =
+                                        NAV_ITEMS.iter().find(|(entry, _, _)| entry == page)
+                                    else {
+                                        continue;
+                                    };
+                                    let keycap = if !pc_keyboard {
+                                        keycap_hint.to_string()
+                                    } else {
+                                        match *page {
+                                            Page::Machine => format!("{keycap_hint} · {km_machine}"),
+                                            Page::Program => format!("{keycap_hint} · {km_prog}"),
+                                            Page::Tools => format!("{keycap_hint} · {km_tools}"),
+                                            Page::Offsets => format!("OFFS · {km_offsets}"),
+                                            _ => keycap_hint.to_string(),
+                                        }
+                                    };
+                                    let selected = *page == current_page
+                                        || (*page == Page::Offsets && current_page == Page::Probe);
+                                    let focused = focus_nav && nav_focus == index;
+
+                                    let card_bg = if selected {
+                                        theme::COCKPIT_BLUE
+                                    } else if focused {
+                                        theme::COCKPIT_CARD_HOVER
+                                    } else {
+                                        theme::COCKPIT_CARD
+                                    };
+                                    let card_border = if selected {
+                                        Color32::from_rgb(0x60, 0xa5, 0xfa)
+                                    } else if focused {
+                                        theme::ACCENT
+                                    } else {
+                                        theme::COCKPIT_BORDER
+                                    };
+
+                                    let icon_color = if selected {
+                                        Color32::WHITE
+                                    } else {
+                                        theme::COCKPIT_TEXT_MUTED
+                                    };
+                                    let label_color = if selected {
+                                        Color32::WHITE
+                                    } else {
+                                        theme::COCKPIT_TEXT_MAIN
+                                    };
+
+                                    let frame = egui::Frame::new()
+                                        .fill(card_bg)
+                                        .stroke(Stroke::new(1.0, card_border))
+                                        .corner_radius(8)
+                                        .inner_margin(egui::Margin::symmetric(8, 4));
+
+                                    let frame_resp = frame.show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+
+                                            // 1. Vector Icon
+                                            let (icon_rect, _) = ui.allocate_exact_size(
+                                                Vec2::splat(16.0),
+                                                Sense::hover(),
+                                            );
+                                            draw_nav_icon(ui.painter(), icon_rect, *page, icon_color);
+
+                                            // 2. Tab Label (native egui layout prevents any text collision)
+                                            ui.label(
+                                                RichText::new(*label)
+                                                    .size(theme::font_size(10.5))
+                                                    .strong()
+                                                    .color(label_color),
+                                            );
+
+                                            // 3. Keycap Badge
+                                            if selected {
+                                                egui::Frame::new()
+                                                    .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 45))
+                                                    .corner_radius(4)
+                                                    .inner_margin(egui::Margin::symmetric(4, 1))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new(&keycap)
+                                                                .monospace()
+                                                                .size(theme::font_size(8.5))
+                                                                .color(Color32::WHITE),
+                                                        );
+                                                    });
+                                            } else {
+                                                egui::Frame::new()
+                                                    .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 12))
+                                                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 25)))
+                                                    .corner_radius(4)
+                                                    .inner_margin(egui::Margin::symmetric(4, 1))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new(&keycap)
+                                                                .monospace()
+                                                                .size(theme::font_size(8.0))
+                                                                .color(theme::COCKPIT_TEXT_DIM),
+                                                        );
+                                                    });
+                                            }
+                                        });
+                                    });
+
+                                    let btn_resp = ui.interact(
+                                        frame_resp.response.rect,
+                                        ui.scope_id().with(index),
+                                        Sense::click(),
+                                    );
+                                    if btn_resp.hovered() && !selected {
+                                        ui.painter().rect_stroke(
+                                            frame_resp.response.rect,
+                                            8,
+                                            Stroke::new(1.0, theme::COCKPIT_BORDER_ACTIVE),
+                                            StrokeKind::Inside,
+                                        );
+                                    }
+                                    if btn_resp.clicked() {
+                                        nav_action = Some((index, *page));
+                                    }
+                                }
+                            });
+                        });
+                },
+                |ui| {
+                    // RIGHT: System Cluster (Right to Left in SidesKind::ShrinkLeft)
+                    ui.spacing_mut().item_spacing.x = 8.0;
+
+                    // 1. Canlı Saat (Digital Cockpit Clock)
+                    ui.label(
+                        RichText::new(format_clock(now_ms()))
+                            .monospace()
+                            .size(theme::font_size(11.5))
+                            .strong()
+                            .color(theme::COCKPIT_TEXT_MAIN),
+                    );
+
+                    // Ayırıcı çizgi
+                    let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 18.0), Sense::hover());
+                    ui.painter().line_segment(
+                        [egui::pos2(sep_rect.center().x, sep_rect.top()), egui::pos2(sep_rect.center().x, sep_rect.bottom())],
+                        Stroke::new(1.0, theme::COCKPIT_BORDER),
+                    );
+
+                    // 2. Dil Seçici Kapsülü ([TR] / [EN])
+                    let (lang_rect, _) = ui.allocate_exact_size(Vec2::new(56.0, 26.0), Sense::hover());
+                    ui.painter().rect_filled(lang_rect, 6, theme::COCKPIT_CARD);
+                    ui.painter().rect_stroke(lang_rect, 6, Stroke::new(1.0, theme::COCKPIT_BORDER), StrokeKind::Inside);
+
+                    let tr_rect = egui::Rect::from_min_max(lang_rect.min + egui::vec2(1.5, 1.5), egui::pos2(lang_rect.center().x - 0.5, lang_rect.max.y - 1.5));
+                    let en_rect = egui::Rect::from_min_max(egui::pos2(lang_rect.center().x + 0.5, lang_rect.min.y + 1.5), lang_rect.max - egui::vec2(1.5, 1.5));
+
+                    let tr_resp = ui.interact(tr_rect, ui.scope_id().with("nav-btn-tr"), Sense::CLICK);
+                    if tr_resp.clicked() {
+                        linc_core::i18n::set_locale(linc_core::i18n::Locale::Tr);
+                    }
+                    ui.painter().rect_filled(tr_rect, 4, if tr_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
+                    ui.painter().text(
+                        tr_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "TR",
+                        FontId::monospace(theme::font_size(9.0)),
+                        if tr_active { Color32::WHITE } else { theme::COCKPIT_TEXT_DIM },
+                    );
+
+                    let en_resp = ui.interact(en_rect, ui.scope_id().with("nav-btn-en"), Sense::CLICK);
+                    if en_resp.clicked() {
+                        linc_core::i18n::set_locale(linc_core::i18n::Locale::En);
+                    }
+                    ui.painter().rect_filled(en_rect, 4, if en_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
+                    ui.painter().text(
+                        en_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "EN",
+                        FontId::monospace(theme::font_size(9.0)),
+                        if en_active { Color32::WHITE } else { theme::COCKPIT_TEXT_DIM },
+                    );
+
+                    // 3. Birleşik Kılavuz, Kısayollar ve G-Code Yardım Menüsü
+                    let (menu_rect, menu_response) =
+                        ui.allocate_exact_size(Vec2::new(115.0, 26.0), Sense::CLICK);
+                    let menu_hovered = menu_response.hovered();
+                    ui.painter().rect_filled(
+                        menu_rect,
+                        6,
+                        if menu_hovered { theme::COCKPIT_CARD_HOVER } else { theme::COCKPIT_CARD },
+                    );
+                    ui.painter().rect_stroke(
+                        menu_rect,
+                        6,
+                        Stroke::new(1.0, if menu_hovered { theme::COCKPIT_BORDER_ACTIVE } else { theme::COCKPIT_BORDER }),
+                        StrokeKind::Inside,
+                    );
+                    // (?) Soru İkonu
+                    let q_c = egui::pos2(menu_rect.left() + 13.0, menu_rect.center().y);
+                    ui.painter().circle_stroke(q_c, 5.5, Stroke::new(1.2, theme::COCKPIT_CYAN));
+                    ui.painter().text(
+                        egui::pos2(q_c.x, q_c.y - 0.5),
+                        Align2::CENTER_CENTER,
+                        "?",
+                        FontId::proportional(theme::font_size(9.0)),
+                        theme::COCKPIT_CYAN,
+                    );
+                    let help_label = if tr_active { "YARDIM ▾" } else { "SHORTCUTS ▾" };
+                    ui.painter().text(
+                        egui::pos2(menu_rect.left() + 24.0, menu_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        help_label,
+                        FontId::proportional(theme::font_size(10.0)),
+                        theme::COCKPIT_TEXT_MAIN,
+                    );
+                    egui::Popup::menu(&menu_response).show(|ui| {
+                        ui.set_width(450.0);
+                        let tab_id = ui.scope_id().with("help_popup_active_tab");
+                        let mut active_tab = ui.data_mut(|d| d.get_temp::<u8>(tab_id).unwrap_or(0));
+
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("📖").size(14.0));
+                            let title_text = if tr_active {
+                                "KILAVUZ & KISAYOL BAŞVURU MERKEZİ"
+                            } else {
+                                "HELP & SHORTCUTS REFERENCE"
+                            };
+                            ui.label(
+                                RichText::new(title_text)
+                                    .strong()
+                                    .size(theme::font_size(11.0))
+                                    .color(Color32::WHITE),
+                            );
+                        });
+                        ui.add_space(4.0);
+
+                        ui.horizontal(|ui| {
+                            let sc_label = if tr_active { "⌨ Kısayollar" } else { "⌨ Shortcuts" };
+                            let sc_btn = ui.selectable_label(active_tab == 0, sc_label);
+                            if sc_btn.clicked() {
+                                active_tab = 0;
+                                ui.data_mut(|d| d.insert_temp(tab_id, active_tab));
+                            }
+
+                            let gc_label = if tr_active { "📄 G-Kodu Kılavuzu" } else { "📄 G-Code Guide" };
+                            let gc_btn = ui.selectable_label(active_tab == 1, gc_label);
+                            if gc_btn.clicked() {
+                                active_tab = 1;
+                                ui.data_mut(|d| d.insert_temp(tab_id, active_tab));
+                            }
+                        });
+                        ui.separator();
+
+                        egui::ScrollArea::vertical()
+                            .id_salt("navigation-help-content")
+                            .max_height(400.0)
+                            .show(ui, |ui| {
+                                if active_tab == 0 {
+                                    render_shortcuts_content(ui, &shortcuts, tr_active);
+                                } else {
+                                    render_gcode_guide_content(ui, &mut open_help_doc, tr_active);
+                                }
+                            });
+                    });
+
+                    // 4. Sistem & Simülasyon Telemetri Kapsülü ([SIM ◨] BaierMill 166 FPS ▾)
+                    let clean_name = machine_name
+                        .strip_suffix(" Simulation")
+                        .unwrap_or(&machine_name);
+                    let (sim_rect, sim_resp) =
+                        ui.allocate_exact_size(Vec2::new(165.0, 26.0), Sense::CLICK);
+                    let sim_hovered = sim_resp.hovered();
+                    ui.painter().rect_filled(
+                        sim_rect,
+                        6,
+                        if sim_hovered { theme::COCKPIT_CARD_HOVER } else { theme::COCKPIT_CARD },
+                    );
+                    ui.painter().rect_stroke(
+                        sim_rect,
+                        6,
+                        Stroke::new(1.0, if sim_hovered { theme::COCKPIT_AMBER } else { theme::COCKPIT_BORDER }),
+                        StrokeKind::Inside,
+                    );
+                    // Amber SIM chip
+                    let sim_pill_rect = egui::Rect::from_center_size(
+                        egui::pos2(sim_rect.left() + 18.0, sim_rect.center().y),
+                        Vec2::new(28.0, 16.0),
+                    );
+                    let sim_bg = if is_open {
+                        theme::COCKPIT_AMBER
+                    } else {
+                        Color32::from_rgba_unmultiplied(245, 158, 11, 40)
+                    };
+                    let sim_fg = if is_open {
+                        Color32::from_rgb(0x1a, 0x12, 0x04)
+                    } else {
+                        theme::COCKPIT_AMBER
+                    };
+                    ui.painter().rect_filled(sim_pill_rect, 4, sim_bg);
+                    ui.painter().rect_stroke(sim_pill_rect, 4, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
+                    ui.painter().text(
+                        sim_pill_rect.center(),
+                        Align2::CENTER_CENTER,
+                        if is_open { "SIM ◨" } else { "SIM ◧" },
+                        FontId::monospace(theme::font_size(8.0)),
+                        sim_fg,
+                    );
+                    // Machine name (no overlap with FPS)
+                    ui.painter().text(
+                        egui::pos2(sim_rect.left() + 36.0, sim_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        clean_name,
+                        FontId::proportional(theme::font_size(10.0)),
+                        Color32::WHITE,
+                    );
+                    // FPS
+                    ui.painter().text(
+                        egui::pos2(sim_rect.right() - 14.0, sim_rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{:.0} FPS", fps_val),
+                        FontId::monospace(theme::font_size(8.5)),
+                        theme::COCKPIT_TEXT_DIM,
+                    );
+                    // Arrow
+                    ui.painter().text(
+                        egui::pos2(sim_rect.right() - 6.0, sim_rect.center().y),
+                        Align2::CENTER_CENTER,
+                        "▾",
+                        FontId::monospace(theme::font_size(8.0)),
+                        theme::COCKPIT_TEXT_DIM,
+                    );
+                    if sim_resp.clicked() && is_sim {
+                        sim_toggle = true;
+                    }
+                    sim_resp.on_hover_ui(|ui| {
+                        ui.label(RichText::new("SİSTEM & SİMÜLASYON TELEMETRİSİ").strong().color(theme::COCKPIT_AMBER));
+                        ui.label(format!("Makine Profili: {machine_name}"));
+                        ui.label(format!("Render Hızı: {fps_val:.0} FPS"));
+                        ui.label("LinuxCNC RT Çekirdek: PREEMPT_RT OK");
+                        if is_sim {
+                            if is_open {
+                                ui.label(RichText::new("• Tıklayarak Simülatör Panelini Gizleyin").size(10.0).color(theme::COCKPIT_TEXT_MUTED));
+                            } else {
+                                ui.label(RichText::new("• Tıklayarak Simülatör Panelini Açın").size(10.0).color(theme::COCKPIT_BLUE));
+                            }
+                        }
+                    });
+                },
+            );
+
+        if let Some((index, page)) = nav_action {
+            ui.memory_mut(|memory| memory.stop_text_input());
+            self.nav.nav_focus = index;
+            self.nav.focus_region = FocusRegion::Nav;
+            self.request_nav_page(page);
+        }
+        if open_help_doc {
+            self.request_page(Page::Help);
+        }
+        if sim_toggle {
+            self.prefs.preferences.sim_panel_pages.insert(
+                self.nav.page.label().to_owned(),
+                !is_open,
+            );
+            self.prefs.dirty = true;
+        }
+    }
+}
+
+fn render_shortcuts_content(
+    ui: &mut egui::Ui,
+    shortcuts: &[ShortcutGroup],
+    tr_active: bool,
+) {
+    ui.add_space(2.0);
+
+    // 1. Sayfa Özel Dinamik Kısayolları (Key Hints - En başta gösterilir)
+    let mut has_page_shortcuts = false;
+    for group in shortcuts {
+        if !group.items.is_empty() {
+            has_page_shortcuts = true;
+            if !group.title.is_empty() {
+                ui.label(
+                    RichText::new(group.title)
+                        .size(theme::font_size(9.0))
+                        .strong()
+                        .color(theme::COCKPIT_CYAN),
+                );
+            }
+            for (key, action) in &group.items {
+                render_shortcut_row(ui, key, action);
+            }
+            ui.add_space(4.0);
+        }
+    }
+
+    if has_page_shortcuts {
+        ui.separator();
+        ui.add_space(4.0);
+    }
+
+    // 2. Ana Sayfa ve Navigasyon
+    ui.label(
+        RichText::new(if tr_active {
+            "ANA SAYFA VE NAVİGASYON TUŞLARI"
+        } else {
+            "NAVIGATION & SCREENS"
+        })
+        .size(theme::font_size(8.5))
+        .strong()
+        .color(theme::COCKPIT_BLUE),
+    );
+    let nav_shortcuts = [
+        ("F5", if tr_active { "Makine / DRO Ekranı (MAIN)" } else { "Machine / DRO Dashboard" }),
+        ("F6", if tr_active { "Program / Dosya Yöneticisi (FILE)" } else { "Program / File Browser" }),
+        ("F7", if tr_active { "Takım Tablosu (TOOL)" } else { "Tool Table Management" }),
+        ("F8", if tr_active { "İş Parçası Sıfırları & Prob (OFFS)" } else { "Work Offsets & Probe" }),
+        ("Ctrl+D", if tr_active { "Teşhis & HAL Sinyalleri (DIAG)" } else { "Diagnostics & HAL Monitor" }),
+        ("Ctrl+H", if tr_active { "G-Kodu Dokümantasyonu (HELP)" } else { "G-Code Help & Manual" }),
+    ];
+    for (key, desc) in nav_shortcuts {
+        render_shortcut_row(ui, key, desc);
+    }
+
+    ui.add_space(6.0);
+    // 3. Makine Kontrol ve Güvenlik
+    ui.label(
+        RichText::new(if tr_active {
+            "MAKİNE KONTROL VE GÜVENLİK TUŞLARI"
+        } else {
+            "MACHINE CONTROL & SAFETY"
+        })
+        .size(theme::font_size(8.5))
+        .strong()
+        .color(theme::COCKPIT_AMBER),
+    );
+    let safety_shortcuts = [
+        ("F1", if tr_active { "Acil Durdurma (E-Stop)" } else { "Emergency Stop (E-Stop)" }),
+        ("F2", if tr_active { "Makine Gücü Aç/Kapat (Power On/Off)" } else { "Machine Power On/Off" }),
+        ("Boşluk", if tr_active { "Feed Hold (Hareketi Duraklat)" } else { "Feed Hold (Pause)" }),
+        ("R / Enter", if tr_active { "G-Kodu Çalıştır / Devam (Start)" } else { "Cycle Start / Resume" }),
+        ("ESC", if tr_active { "Hareketi Durdur / İptal (Abort)" } else { "Abort / Cancel Motion" }),
+        ("T", if tr_active { "Tek Blok Modu (Single Step)" } else { "Single Step Mode" }),
+    ];
+    for (key, desc) in safety_shortcuts {
+        render_shortcut_row(ui, key, desc);
+    }
+}
+
+fn render_shortcut_row(ui: &mut egui::Ui, key: &str, desc: &str) {
+    ui.horizontal(|ui| {
+        egui::Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(59, 130, 246, 25))
+            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(59, 130, 246, 70)))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(6, 2))
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(key)
+                        .monospace()
+                        .size(theme::font_size(9.0))
+                        .strong()
+                        .color(Color32::from_rgb(0x93, 0xc5, 0xfd)),
+                );
+            });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                RichText::new(format_clock(now_ms()))
-                    .monospace()
-                    .size(theme::font_size(12.5))
-                    .strong()
+                RichText::new(desc)
+                    .size(theme::font_size(9.5))
                     .color(theme::COCKPIT_TEXT_MAIN),
             );
-
-            // Ayırıcı çizgi
-            let (sep_rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 20.0), Sense::hover());
-            ui.painter().line_segment(
-                [egui::pos2(sep_rect.center().x, sep_rect.top()), egui::pos2(sep_rect.center().x, sep_rect.bottom())],
-                Stroke::new(1.0, theme::COCKPIT_BORDER),
-            );
-
-            // 2. Dil Seçici Kapsülü ([TR] / [EN])
-            let cur_loc = linc_core::i18n::current_locale();
-            let tr_active = cur_loc == linc_core::i18n::Locale::Tr;
-            let en_active = cur_loc == linc_core::i18n::Locale::En;
-            let (lang_rect, _) = ui.allocate_exact_size(Vec2::new(62.0, 32.0), Sense::hover());
-            ui.painter().rect_filled(lang_rect, 6, theme::COCKPIT_CARD);
-            ui.painter().rect_stroke(lang_rect, 6, Stroke::new(1.0, theme::COCKPIT_BORDER), StrokeKind::Inside);
-
-            let tr_rect = egui::Rect::from_min_max(lang_rect.min + egui::vec2(2.0, 2.0), egui::pos2(lang_rect.center().x - 1.0, lang_rect.max.y - 2.0));
-            let en_rect = egui::Rect::from_min_max(egui::pos2(lang_rect.center().x + 1.0, lang_rect.min.y + 2.0), lang_rect.max - egui::vec2(2.0, 2.0));
-
-            let tr_resp = ui.interact(tr_rect, ui.scope_id().with("nav-btn-tr"), Sense::CLICK);
-            if tr_resp.clicked() {
-                linc_core::i18n::set_locale(linc_core::i18n::Locale::Tr);
-            }
-            ui.painter().rect_filled(tr_rect, 4, if tr_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
-            ui.painter().text(
-                tr_rect.center(),
-                Align2::CENTER_CENTER,
-                "TR",
-                FontId::monospace(theme::font_size(9.5)),
-                if tr_active { Color32::WHITE } else { theme::COCKPIT_TEXT_DIM },
-            );
-
-            let en_resp = ui.interact(en_rect, ui.scope_id().with("nav-btn-en"), Sense::CLICK);
-            if en_resp.clicked() {
-                linc_core::i18n::set_locale(linc_core::i18n::Locale::En);
-            }
-            ui.painter().rect_filled(en_rect, 4, if en_active { theme::COCKPIT_BLUE } else { Color32::TRANSPARENT });
-            ui.painter().text(
-                en_rect.center(),
-                Align2::CENTER_CENTER,
-                "EN",
-                FontId::monospace(theme::font_size(9.5)),
-                if en_active { Color32::WHITE } else { theme::COCKPIT_TEXT_DIM },
-            );
-
-            // 3. Kısayollar & G-Code Yardım Menüsü ((?) Icon + "SHORTCUTS ▾")
-            let (menu_rect, menu_response) =
-                ui.allocate_exact_size(Vec2::new(115.0, 32.0), Sense::CLICK);
-            let menu_hovered = menu_response.hovered();
-            ui.painter().rect_filled(
-                menu_rect,
-                8,
-                if menu_hovered { theme::COCKPIT_CARD_HOVER } else { theme::COCKPIT_CARD },
-            );
-            ui.painter().rect_stroke(
-                menu_rect,
-                8,
-                Stroke::new(1.0, if menu_hovered { theme::COCKPIT_BORDER_ACTIVE } else { theme::COCKPIT_BORDER }),
-                StrokeKind::Inside,
-            );
-            // (?) Soru İkonu
-            let q_c = egui::pos2(menu_rect.left() + 14.0, menu_rect.center().y);
-            ui.painter().circle_stroke(q_c, 6.0, Stroke::new(1.2, theme::COCKPIT_CYAN));
-            ui.painter().text(
-                egui::pos2(q_c.x, q_c.y - 0.5),
-                Align2::CENTER_CENTER,
-                "?",
-                FontId::proportional(theme::font_size(9.5)),
-                theme::COCKPIT_CYAN,
-            );
-            ui.painter().text(
-                egui::pos2(menu_rect.left() + 25.0, menu_rect.center().y),
-                Align2::LEFT_CENTER,
-                "SHORTCUTS ▾",
-                FontId::proportional(theme::font_size(10.0)),
-                theme::COCKPIT_TEXT_MAIN,
-            );
-            egui::Popup::menu(&menu_response).show(|ui| {
-                ui.set_min_width(260.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("navigation-shortcuts")
-                    .max_height(500.0)
-                    .show(ui, |ui| {
-                        ui.label(RichText::new("📖 KISAYOLLAR & G-KODU YARDIMI").strong().color(theme::COCKPIT_CYAN));
-                        ui.add_space(4.0);
-                        for group in &shortcuts {
-                            if !group.title.is_empty() {
-                                ui.add_space(5.0);
-                                ui.label(
-                                    RichText::new(group.title)
-                                        .size(theme::font_size(8.5))
-                                        .strong()
-                                        .color(theme::COCKPIT_TEXT_MUTED),
-                                );
-                            }
-                            for (key, action) in &group.items {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(key)
-                                            .monospace()
-                                            .size(theme::font_size(9.0))
-                                            .color(theme::C3),
-                                    );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.label(
-                                            RichText::new(*action)
-                                                .size(theme::font_size(9.0))
-                                                .color(theme::COCKPIT_TEXT_MUTED),
-                                        );
-                                    });
-                                });
-                            }
-                        }
-                    });
-            });
-
-            // 4. Sistem & Simülasyon Telemetri Kapsülü ([SIM ◨] BaierMill 166 FPS ▾)
-            let is_sim = self.is_sim();
-            let is_open = self.sim_panel_should_show();
-            let (sim_rect, sim_resp) =
-                ui.allocate_exact_size(Vec2::new(165.0, 32.0), Sense::CLICK);
-            let sim_hovered = sim_resp.hovered();
-            ui.painter().rect_filled(
-                sim_rect,
-                8,
-                if sim_hovered { theme::COCKPIT_CARD_HOVER } else { theme::COCKPIT_CARD },
-            );
-            ui.painter().rect_stroke(
-                sim_rect,
-                8,
-                Stroke::new(1.0, if sim_hovered { theme::COCKPIT_AMBER } else { theme::COCKPIT_BORDER }),
-                StrokeKind::Inside,
-            );
-            // Amber SIM chip
-            let sim_pill_rect = egui::Rect::from_center_size(
-                egui::pos2(sim_rect.left() + 20.0, sim_rect.center().y),
-                Vec2::new(30.0, 17.0),
-            );
-            let sim_bg = if is_open {
-                theme::COCKPIT_AMBER
-            } else {
-                Color32::from_rgba_unmultiplied(245, 158, 11, 40)
-            };
-            let sim_fg = if is_open {
-                Color32::from_rgb(0x1a, 0x12, 0x04)
-            } else {
-                theme::COCKPIT_AMBER
-            };
-            ui.painter().rect_filled(sim_pill_rect, 4, sim_bg);
-            ui.painter().rect_stroke(sim_pill_rect, 4, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
-            ui.painter().text(
-                sim_pill_rect.center(),
-                Align2::CENTER_CENTER,
-                if is_open { "SIM ◨" } else { "SIM ◧" },
-                FontId::monospace(theme::font_size(8.5)),
-                sim_fg,
-            );
-            // Machine name
-            ui.painter().text(
-                egui::pos2(sim_rect.left() + 39.0, sim_rect.center().y),
-                Align2::LEFT_CENTER,
-                &self.profile.config.machine.name,
-                FontId::proportional(theme::font_size(10.5)),
-                Color32::WHITE,
-            );
-            // FPS
-            ui.painter().text(
-                egui::pos2(sim_rect.right() - 15.0, sim_rect.center().y),
-                Align2::RIGHT_CENTER,
-                format!("{:.0} FPS", self.fps),
-                FontId::monospace(theme::font_size(9.0)),
-                theme::COCKPIT_TEXT_DIM,
-            );
-            // Arrow
-            ui.painter().text(
-                egui::pos2(sim_rect.right() - 6.0, sim_rect.center().y),
-                Align2::CENTER_CENTER,
-                "▾",
-                FontId::monospace(theme::font_size(8.0)),
-                theme::COCKPIT_TEXT_DIM,
-            );
-            if sim_resp.clicked() && is_sim {
-                self.prefs.preferences.sim_panel_pages.insert(
-                    self.nav.page.label().to_owned(),
-                    !is_open,
-                );
-                self.prefs.dirty = true;
-            }
-            let mach_name = self.profile.config.machine.name.clone();
-            let fps_val = self.fps;
-            sim_resp.on_hover_ui(|ui| {
-                ui.label(RichText::new("SİSTEM & SİMÜLASYON TELEMETRİSİ").strong().color(theme::COCKPIT_AMBER));
-                ui.label(format!("Makine Profili: {mach_name}"));
-                ui.label(format!("Render Hızı: {fps_val:.0} FPS"));
-                ui.label("LinuxCNC RT Çekirdek: PREEMPT_RT OK");
-                if is_sim {
-                    if is_open {
-                        ui.label(RichText::new("• Tıklayarak Simülatör Panelini Gizleyin").size(10.0).color(theme::COCKPIT_TEXT_MUTED));
-                    } else {
-                        ui.label(RichText::new("• Tıklayarak Simülatör Panelini Açın").size(10.0).color(theme::COCKPIT_BLUE));
-                    }
-                }
-            });
-
-            // 5. Sol Sekme Alanı: HTML Prototipi ile Birebir Tek Satırlı Şık Sekmeler
-            egui::ScrollArea::horizontal()
-                .id_salt("navigation-tabs")
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        for (index, page) in self.nav.pages.clone().iter().enumerate() {
-                            let Some((_, label, keycap)) =
-                                NAV_ITEMS.iter().find(|(entry, _, _)| entry == page)
-                            else {
-                                continue;
-                            };
-                            let keycap = nav_keycap(self, *page, keycap);
-                            let selected = *page == self.nav.page
-                                || (*page == Page::Offsets && self.nav.page == Page::Probe);
-                            let focused = self.nav.focus_region == FocusRegion::Nav
-                                && self.nav.nav_focus == index;
-
-                            let label_w = theme::measure(ui, label, 11.0);
-                            let keycap_w = theme::measure(ui, &keycap, 8.5);
-                            let width = if selected {
-                                16.0 + 16.0 + label_w + 8.0 + keycap_w + 14.0
-                            } else {
-                                12.0 + 16.0 + label_w + 6.0 + keycap_w + 10.0
-                            };
-
-                            let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(width, 32.0),
-                                Sense::CLICK,
-                            );
-                            let hovered = response.hovered();
-
-                            let card_bg = if selected {
-                                theme::COCKPIT_BLUE
-                            } else if hovered || focused {
-                                theme::COCKPIT_CARD_HOVER
-                            } else {
-                                theme::COCKPIT_CARD
-                            };
-                            let card_border = if selected {
-                                Color32::from_rgb(0x60, 0xa5, 0xfa)
-                            } else if focused {
-                                theme::ACCENT
-                            } else if hovered {
-                                theme::COCKPIT_BORDER_ACTIVE
-                            } else {
-                                theme::COCKPIT_BORDER
-                            };
-
-                            let painter = ui.painter();
-                            painter.rect_filled(rect, 10, card_bg);
-                            painter.rect_stroke(
-                                rect,
-                                10,
-                                Stroke::new(1.0, card_border),
-                                StrokeKind::Inside,
-                            );
-
-                            let icon_color = if selected {
-                                Color32::WHITE
-                            } else if hovered {
-                                Color32::WHITE
-                            } else {
-                                theme::COCKPIT_TEXT_MUTED
-                            };
-                            let label_color = if selected {
-                                Color32::WHITE
-                            } else if hovered {
-                                Color32::WHITE
-                            } else {
-                                theme::COCKPIT_TEXT_MUTED
-                            };
-
-                            let icon_x = rect.left() + (if selected { 13.0 } else { 10.0 });
-                            draw_nav_icon(
-                                painter,
-                                egui::Rect::from_center_size(
-                                    egui::pos2(icon_x, rect.center().y),
-                                    Vec2::splat(18.0),
-                                ),
-                                *page,
-                                icon_color,
-                            );
-
-                            let text_x = icon_x + 13.0;
-                            painter.text(
-                                egui::pos2(text_x, rect.center().y),
-                                Align2::LEFT_CENTER,
-                                *label,
-                                FontId::proportional(theme::font_size(11.0)),
-                                label_color,
-                            );
-
-                            let keycap_x = text_x + label_w + 6.0;
-                            if selected {
-                                let pill_rect = egui::Rect::from_center_size(
-                                    egui::pos2(keycap_x + keycap_w / 2.0 + 3.0, rect.center().y),
-                                    Vec2::new(keycap_w + 8.0, 16.0),
-                                );
-                                painter.rect_filled(pill_rect, 4, Color32::from_rgba_unmultiplied(255, 255, 255, 55));
-                                painter.text(
-                                    pill_rect.center(),
-                                    Align2::CENTER_CENTER,
-                                    &keycap,
-                                    FontId::monospace(theme::font_size(8.5)),
-                                    Color32::WHITE,
-                                );
-                            } else {
-                                painter.text(
-                                    egui::pos2(keycap_x, rect.center().y),
-                                    Align2::LEFT_CENTER,
-                                    &keycap,
-                                    FontId::monospace(theme::font_size(8.5)),
-                                    theme::COCKPIT_TEXT_DIM,
-                                );
-                            }
-
-                            if response.clicked() {
-                                ui.memory_mut(|memory| memory.stop_text_input());
-                                self.nav.nav_focus = index;
-                                self.nav.focus_region = FocusRegion::Nav;
-                                self.request_nav_page(*page);
-                            }
-                        }
-                    });
-                });
         });
+    });
+}
+
+fn render_gcode_guide_content(ui: &mut egui::Ui, open_full_doc: &mut bool, tr_active: bool) {
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(if tr_active {
+            "STANDART G VE M KODLARI HIZLI KILAVUZU"
+        } else {
+            "STANDARD G & M CODES REFERENCE"
+        })
+        .size(theme::font_size(8.5))
+        .strong()
+        .color(theme::COCKPIT_CYAN),
+    );
+    ui.add_space(4.0);
+
+    let gcodes = [
+        ("G00", if tr_active { "Boşta Hızlı Konumlanma (Rapid Traverse - Kesim yapmadan pozisyon alma)" } else { "Rapid Traverse (Non-cutting rapid positioning)" }, Color32::from_rgb(0x67, 0xe8, 0xf9)),
+        ("G01", if tr_active { "Doğrusal Kesme (Linear Feed - Verilen F ilerleme hızında kesim)" } else { "Linear Interpolation (Cutting move at F feedrate)" }, Color32::from_rgb(0x67, 0xe8, 0xf9)),
+        ("G02", if tr_active { "Dairesel Kesme CW (Saat Yönünde Dairesel Kavis)" } else { "Circular Interpolation CW (Clockwise arc)" }, Color32::from_rgb(0x67, 0xe8, 0xf9)),
+        ("G03", if tr_active { "Dairesel Kesme CCW (Saat Yönünün Tersine Dairesel Kavis)" } else { "Circular Interpolation CCW (Counter-clockwise arc)" }, Color32::from_rgb(0x67, 0xe8, 0xf9)),
+        ("G04", if tr_active { "Bekleme Süresi (Dwell - P parametresi kadar duraklama)" } else { "Dwell (Wait for P milliseconds/seconds)" }, Color32::from_rgb(0x67, 0xe8, 0xf9)),
+        ("G17-G19", if tr_active { "Çalışma Düzlemi Seçimi (G17: XY Tabla, G18: XZ Torna, G19: YZ)" } else { "Plane Selection (G17: XY, G18: XZ, G19: YZ)" }, Color32::from_rgb(0x93, 0xc5, 0xfd)),
+        ("G20/G21", if tr_active { "Birim Seçimi (G20: İnç, G21: Milimetre)" } else { "Units (G20: Inches, G21: Millimeters)" }, Color32::from_rgb(0x93, 0xc5, 0xfd)),
+        ("G28/G30", if tr_active { "Referans Noktasına Dönüş (Home / Park Pozisyonu)" } else { "Return to Reference Point (Home/Park)" }, Color32::from_rgb(0x93, 0xc5, 0xfd)),
+        ("G54-G59", if tr_active { "İş Parçası Koordinat Sistemleri (WCS 1 - 6 Parça Sıfırları)" } else { "Work Coordinate Systems (WCS 1 to 6 offsets)" }, Color32::from_rgb(0x67, 0xe8, 0xf9)),
+        ("G90/G91", if tr_active { "Koordinat Modu (G90: Mutlak / Absolute, G91: Artımlı / Incremental)" } else { "Distance Mode (G90: Absolute, G91: Incremental)" }, Color32::from_rgb(0x93, 0xc5, 0xfd)),
+        ("G94/G95", if tr_active { "İlerleme Modu (G94: mm/dk, G95: mm/devir torna)" } else { "Feed Mode (G94: Units/min, G95: Units/rev)" }, Color32::from_rgb(0x93, 0xc5, 0xfd)),
+        ("M03", if tr_active { "Spindle Milini Saat Yönünde Döndür (CW) [Örn: M3 S18000]" } else { "Spindle CW On [e.g. M3 S18000]" }, Color32::from_rgb(0xfc, 0xd3, 0x4d)),
+        ("M04", if tr_active { "Spindle Milini Ters Saat Yönünde Döndür (CCW)" } else { "Spindle CCW On" }, Color32::from_rgb(0xfc, 0xd3, 0x4d)),
+        ("M05", if tr_active { "Spindle Milini Durdur (Spindle Stop)" } else { "Spindle Stop" }, Color32::from_rgb(0xfc, 0xd3, 0x4d)),
+        ("M06", if tr_active { "Takım Değiştirme Komutu (Tool Change - Örn: T1 M6)" } else { "Tool Change (e.g. T1 M6)" }, Color32::from_rgb(0x86, 0xef, 0xac)),
+        ("M08/M09", if tr_active { "Soğutma Sıvısı (M8: Soğutmayı Aç, M9: Soğutmayı Kapat)" } else { "Coolant (M8: Flood Coolant On, M9: Coolant Off)" }, Color32::from_rgb(0x86, 0xef, 0xac)),
+        ("M30", if tr_active { "Program Sonu ve Başa Dönüş (End of Program & Rewind)" } else { "Program End and Rewind" }, Color32::from_rgb(0xf8, 0x71, 0x71)),
+    ];
+
+    for (code, desc, color) in gcodes {
+        ui.horizontal(|ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 12))
+                .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)))
+                .corner_radius(4)
+                .inner_margin(egui::Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(code)
+                            .monospace()
+                            .size(theme::font_size(9.5))
+                            .strong()
+                            .color(color),
+                    );
+                });
+            ui.label(
+                RichText::new(desc)
+                    .size(theme::font_size(9.5))
+                    .color(theme::COCKPIT_TEXT_MAIN),
+            );
+        });
+        ui.add_space(2.0);
+    }
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+    let open_full_btn = ui.add(
+        egui::Button::new(
+            RichText::new(if tr_active {
+                "📖 DETAYLI G-KODU DOKÜMANTASYONUNU AÇ (Ctrl+H)"
+            } else {
+                "📖 OPEN FULL G-CODE DOCUMENTATION (Ctrl+H)"
+            })
+            .strong()
+            .size(theme::font_size(10.0))
+            .color(Color32::WHITE),
+        )
+        .fill(theme::COCKPIT_BLUE)
+        .corner_radius(6)
+        .min_size(Vec2::new(ui.available_width(), 28.0)),
+    );
+    if open_full_btn.clicked() {
+        *open_full_doc = true;
+        ui.close();
     }
 }
 
