@@ -27,6 +27,7 @@ override_dh_auto_install:
 	install -Dm644 assets/branding/linc-icon-256.png debian/linc/usr/share/icons/hicolor/256x256/apps/linc.png
 	install -Dm644 README.md debian/linc/usr/share/doc/linc/README.md
 	install -Dm644 debian/copyright debian/linc/usr/share/doc/linc/copyright
+	install -Dm644 assets/panel-icons/tabler/LICENSE debian/linc/usr/share/doc/linc/tabler-icons-LICENSE
 
 override_dh_auto_clean:
 	dh_auto_clean

@@ -268,7 +268,13 @@ impl LincApp {
     /// and hidden on editing/configuration pages (Program, Tools, Files, Diagnostics, Help),
     /// unless the operator explicitly toggled it open or closed via the top bar.
     pub fn sim_panel_should_show(&self) -> bool {
-        if self.profile.config.machine.kind != "sim" || !self.embedded_panel_visible {
+        if self.profile.config.machine.kind != "sim" {
+            return false;
+        }
+        if let Some(visible) = self.prefs.preferences.sim_panel_pages.get(self.nav.page.label()) {
+            return *visible;
+        }
+        if !self.embedded_panel_visible {
             return false;
         }
         let is_operational = matches!(

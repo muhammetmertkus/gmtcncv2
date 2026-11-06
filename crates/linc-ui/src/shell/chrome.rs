@@ -77,19 +77,11 @@ impl LincApp {
                             text_col,
                         );
                         if resp.clicked() {
-                            let is_operational = matches!(
-                                self.nav.page,
-                                crate::state::Page::Machine
-                                    | crate::state::Page::Manual
-                                    | crate::state::Page::Homing
-                                    | crate::state::Page::Offsets
-                                    | crate::state::Page::Probe
+                            self.prefs.preferences.sim_panel_pages.insert(
+                                self.nav.page.label().to_owned(),
+                                !is_open,
                             );
-                            if is_operational {
-                                self.embedded_panel_visible = !self.embedded_panel_visible;
-                            } else {
-                                self.sim_panel_force_show = !self.sim_panel_force_show;
-                            }
+                            self.prefs.dirty = true;
                         }
                         let tip = if is_open {
                             "Simülatör Operatör Panelini Gizle"
@@ -183,22 +175,60 @@ impl LincApp {
                 } else {
                     theme::MUTED
                 };
-                ui.label(
-                    RichText::new(format!("ALARM {alarms}"))
-                        .monospace()
-                        .size(theme::font_size(12.0))
-                        .color(alarm_color),
+                let alarm_galley = ui.painter().layout_no_wrap(
+                    format!("ALARM {alarms}"),
+                    FontId::monospace(theme::font_size(12.0)),
+                    alarm_color,
                 );
-                ui.label(
-                    RichText::new(format!("MSG {messages}"))
-                        .monospace()
-                        .size(theme::font_size(12.0))
-                        .color(if messages > 0 {
-                            theme::FG
-                        } else {
-                            theme::MUTED
-                        }),
+                let (alarm_rect, alarm_resp) = ui.allocate_exact_size(alarm_galley.size(), Sense::click());
+                ui.painter().galley(alarm_rect.min, alarm_galley, alarm_color);
+                if alarm_resp.clicked() && alarm_resp.hovered() {
+                    self.nav.page = Page::Diagnostics;
+                }
+                if alarms > 0 {
+                    alarm_resp.on_hover_ui(|ui| {
+                        ui.label(RichText::new(linc_core::i18n::t("shell.top_bar.alarms")).strong().color(theme::ERROR));
+                        for alarm in self.snapshot.alarms.iter().take(5) {
+                            let colour = match alarm.severity {
+                                linc_core::model::AlarmSeverity::Critical
+                                | linc_core::model::AlarmSeverity::Error => theme::ERROR,
+                                linc_core::model::AlarmSeverity::Warning => theme::WARNING,
+                                linc_core::model::AlarmSeverity::Info => theme::MUTED,
+                            };
+                            let text = linc_core::i18n::translate_cnc_message(&alarm.message);
+                            ui.label(RichText::new(format!("• {text}")).size(11.0).color(colour));
+                        }
+                    });
+                } else {
+                    alarm_resp.on_hover_text(linc_core::i18n::t("shell.top_bar.alarms"));
+                }
+
+                let msg_color = if messages > 0 {
+                    theme::FG
+                } else {
+                    theme::MUTED
+                };
+                let msg_galley = ui.painter().layout_no_wrap(
+                    format!("MSG {messages}"),
+                    FontId::monospace(theme::font_size(12.0)),
+                    msg_color,
                 );
+                let (msg_rect, msg_resp) = ui.allocate_exact_size(msg_galley.size(), Sense::click());
+                ui.painter().galley(msg_rect.min, msg_galley, msg_color);
+                if msg_resp.clicked() && msg_resp.hovered() {
+                    self.nav.page = Page::Diagnostics;
+                }
+                if messages > 0 {
+                    msg_resp.on_hover_ui(|ui| {
+                        ui.label(RichText::new(linc_core::i18n::t("shell.top_bar.messages")).strong().color(theme::ACCENT));
+                        for alarm in self.snapshot.alarms.iter().take(5) {
+                            let text = linc_core::i18n::translate_cnc_message(&alarm.message);
+                            ui.label(RichText::new(format!("• {text}")).size(11.0).color(theme::FG));
+                        }
+                    });
+                } else {
+                    msg_resp.on_hover_text(linc_core::i18n::t("shell.top_bar.messages"));
+                }
                 ui.add_space(14.0);
                 // `PANEL ●`: the word names what the dot watches, the colour
                 // carries the state, the tooltip spells it out.
@@ -267,6 +297,8 @@ impl LincApp {
                 if tr_resp.hovered() {
                     tr_resp.on_hover_text("Türkçe arayüz");
                 }
+
+                self.status_badges(ui);
             });
         });
     }
@@ -511,37 +543,69 @@ impl LincApp {
         });
     }
 
-    pub(super) fn banners(&mut self, ui: &mut egui::Ui) {
-        // The E-stop is the most severe state and is never hidden behind a tab.
+    pub(super) fn banners(&mut self, _ui: &mut egui::Ui) {
+        // Status alerts are rendered as compact, high-visibility badges in the top bar (`top_bar`),
+        // preventing vertical layout shifts and maximizing screen area for 3D preview and toolpaths.
+    }
+
+    pub(super) fn status_badges(&mut self, ui: &mut egui::Ui) {
+        let size = theme::font_size(10.0);
         if self.snapshot.machine.estop {
-            theme::banner(
-                ui,
-                theme::ERROR,
-                "EMERGENCY STOP ACTIVE — MOTION AND MACHINE ACTIONS BLOCKED",
-            );
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            let label = linc_core::i18n::t("shell.badges.estop");
+            let tooltip = linc_core::i18n::t("shell.badges.estop_tooltip");
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(56.0, 18.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3, theme::ERROR);
+            ui.painter().rect_stroke(rect, 3, Stroke::new(1.0, Color32::from_rgb(255, 120, 120)), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::WHITE);
+            resp.on_hover_text(tooltip);
         }
         if self.snapshot.limits_overridden {
-            theme::banner(
-                ui,
-                theme::WARNING,
-                "LIMITS OVERRIDE ACTIVE — LIMIT SWITCHES ARE IGNORED",
-            );
-            ui.add_space(4.0);
-        }
-        if self.panel_offline() {
-            theme::banner(ui, theme::ERROR, "PANEL OFFLINE — MACHINE ACTIONS BLOCKED");
-            ui.add_space(4.0);
-        } else if self.invalid_mode() {
-            theme::banner(ui, theme::ERROR, "PANEL MODE INVALID — FAILS CLOSED");
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            let label = linc_core::i18n::t("shell.badges.limits_override");
+            let tooltip = linc_core::i18n::t("shell.badges.limits_override_tooltip");
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(76.0, 18.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3, theme::WARNING);
+            ui.painter().rect_stroke(rect, 3, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::from_rgb(0x1a, 0x12, 0x04));
+            resp.on_hover_text(tooltip);
         }
         if let Some(fault) = self.snapshot.probe_trip.clone() {
-            let text = probe_trip_banner_text(&fault);
-            if theme::banner_action(ui, theme::ERROR, &text, PROBE_TRIP_ACTION) {
+            ui.add_space(8.0);
+            let label = linc_core::i18n::t("shell.badges.probe_trip");
+            let trip_desc = probe_trip_banner_text(&fault);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(84.0, 18.0), Sense::click());
+            let bg = if resp.hovered() { Color32::from_rgb(255, 80, 80) } else { theme::ERROR };
+            ui.painter().rect_filled(rect, 3, bg);
+            ui.painter().rect_stroke(rect, 3, Stroke::new(1.0, Color32::from_rgb(255, 150, 150)), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::WHITE);
+            if resp.clicked() {
                 self.clear_probe_trip();
             }
-            ui.add_space(4.0);
+            resp.on_hover_ui(|ui| {
+                ui.label(RichText::new(linc_core::i18n::t("shell.badges.probe_trip_tooltip")).strong().color(theme::ERROR));
+                ui.label(RichText::new(trip_desc).size(11.0));
+                ui.label(RichText::new("Sıfırlamak için tıklayın").size(10.0).color(theme::MUTED));
+            });
+        }
+        if self.panel_offline() {
+            ui.add_space(8.0);
+            let label = linc_core::i18n::t("shell.badges.panel_offline");
+            let tooltip = linc_core::i18n::t("shell.badges.panel_offline_tooltip");
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(86.0, 18.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3, theme::ERROR);
+            ui.painter().rect_stroke(rect, 3, Stroke::new(1.0, Color32::from_rgb(255, 120, 120)), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::WHITE);
+            resp.on_hover_text(tooltip);
+        } else if self.invalid_mode() {
+            ui.add_space(8.0);
+            let label = linc_core::i18n::t("shell.badges.panel_invalid");
+            let tooltip = linc_core::i18n::t("shell.badges.panel_invalid_tooltip");
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(76.0, 18.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3, theme::ERROR);
+            ui.painter().rect_stroke(rect, 3, Stroke::new(1.0, Color32::from_rgb(255, 120, 120)), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::WHITE);
+            resp.on_hover_text(tooltip);
         }
         if self.program_protected()
             && matches!(
@@ -549,20 +613,24 @@ impl LincApp {
                 Page::Program | Page::Offsets | Page::Tools | Page::Probe | Page::Files
             )
         {
-            theme::banner(
-                ui,
-                theme::WARNING,
-                "PROTECT ON — EDITING LOCKED. Buffer preserved; writes, imports and applies are blocked.",
-            );
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            let label = linc_core::i18n::t("shell.badges.protect");
+            let tooltip = linc_core::i18n::t("shell.badges.protect_tooltip");
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(52.0, 18.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3, theme::WARNING);
+            ui.painter().rect_stroke(rect, 3, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::from_rgb(0x1a, 0x12, 0x04));
+            resp.on_hover_text(tooltip);
         }
         if self.nav.page == Page::Program && self.program.external_change {
-            theme::banner(
-                ui,
-                theme::WARNING,
-                "PROGRAM CHANGED EXTERNALLY — unsaved buffer preserved. Save will use the current revision.",
-            );
-            ui.add_space(4.0);
+            ui.add_space(8.0);
+            let label = linc_core::i18n::t("shell.badges.ext_change");
+            let tooltip = linc_core::i18n::t("shell.badges.ext_change_tooltip");
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(82.0, 18.0), Sense::hover());
+            ui.painter().rect_filled(rect, 3, theme::WARNING);
+            ui.painter().rect_stroke(rect, 3, Stroke::new(1.0, Color32::BLACK), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(size), Color32::from_rgb(0x1a, 0x12, 0x04));
+            resp.on_hover_text(tooltip);
         }
     }
 }

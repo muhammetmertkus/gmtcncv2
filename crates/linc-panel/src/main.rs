@@ -137,7 +137,11 @@ fn main() -> Result<()> {
     // socket's control surface is a view of this one state. The window and the
     // panel loop share it, so a tool's change is an operator's change.
     let sim_handle = if simulated {
-        Some(linc_panel::sim::SimPanelHandle::new())
+        let handle = linc_panel::sim::SimPanelHandle::new();
+        if profile.config.machine.kind == "sim" {
+            handle.set(|state| state.configure_angular_jog(&profile.machine_ini));
+        }
+        Some(handle)
     } else {
         None
     };
@@ -247,6 +251,7 @@ fn run_physical(
         shutdown,
         None,
         Some(panel_bus),
+        None,
     )
 }
 
@@ -292,6 +297,15 @@ fn run_simulated(
         handle.set(|state| state.apply_start(start));
     }
     let mut driver = linc_panel::SimPanelDriver::new(handle.clone(), cycle);
+    // A profile and the active LinuxCNC INI must describe the same machine.
+    // Never expose the rotary HAL pins on a real or mismatched profile.
+    let active_ini_matches = std::env::var_os("INI_FILE_NAME")
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .zip(std::fs::canonicalize(&profile.machine_ini_path).ok())
+        .is_some_and(|(active, configured)| active == configured);
+    let angular_source = (!no_hal && profile.config.machine.kind == "sim"
+        && active_ini_matches && handle.snapshot().angular_jog.is_some())
+        .then(|| handle.clone());
     // This function is entered only for the simulator. Keep the panel service
     // and HAL pins alive while its window is embedded in the HMI.
     let embedded_only = std::env::var_os("LINC_EMBEDDED_PANEL_ONLY").as_deref() == Some(std::ffi::OsStr::new("1"));
@@ -320,6 +334,7 @@ fn run_simulated(
         let loop_shutdown = shutdown.clone();
         let loop_ipc = ipc.clone();
         let loop_bus = panel_bus.clone();
+        let loop_angular = angular_source.clone();
         let run_thread = thread::spawn(move || {
             let mut driver = linc_panel::SimPanelDriver::new(loop_handle, cycle);
             if let Err(error) = run_loop(
@@ -330,6 +345,7 @@ fn run_simulated(
                 loop_shutdown,
                 loop_ipc,
                 Some(loop_bus),
+                loop_angular,
             ) {
                 log::error!("simulator panel loop stopped: {error:#}");
             }
@@ -356,6 +372,7 @@ fn run_simulated(
             shutdown,
             ipc,
             Some(panel_bus),
+            angular_source,
         )
     }
 }
@@ -369,11 +386,12 @@ fn run_loop(
     shutdown: Arc<AtomicBool>,
     mut ipc: Option<SimPanelIpc>,
     panel_bus: Option<Arc<Mutex<linc_diag::PanelBus>>>,
+    angular_source: Option<linc_panel::sim::SimPanelHandle>,
 ) -> Result<()> {
     let mut hal = if no_hal {
         None
     } else {
-        match linc_panel::CncPanelHal::new() {
+        match linc_panel::CncPanelHal::new_with_sim_angular(angular_source.is_some()) {
             Ok(hal) => Some(hal),
             Err(error) => {
                 log::warn!("cnc_panel HAL unavailable: {error}");
@@ -382,15 +400,42 @@ fn run_loop(
         }
     };
     let mut last_snapshot = PanelSnapshot::default();
+    let mut rotary_arbiter = linc_panel::jog_arbiter::JogRateArbiter::default();
+    let mut last_rotary_settings: Option<(f64, f64)> = None;
     let mut last_connection: Option<bool> = None;
     loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        let snapshot = driver.poll().unwrap_or_else(|error| {
+        let mut snapshot = driver.poll().unwrap_or_else(|error| {
             log::warn!("panel poll failed: {error}");
             PanelSnapshot::default()
         });
+        if let (Some(source), Some(hal)) = (angular_source.as_ref(), hal.as_mut()) {
+            let now = std::time::Instant::now();
+            let rotary = source.snapshot().angular_jog;
+            if let Some(settings) = rotary {
+                let increment = settings.increments.get(settings.increment_index)
+                    .map(|(_, value)| *value).unwrap_or(0.0);
+                let requested = if snapshot.rapid { settings.max_speed } else { settings.speed };
+                let feed = if snapshot.feed_override.is_finite() { snapshot.feed_override.max(0.0) } else { 0.0 };
+                let speed = (requested * feed).min(settings.max_speed) * 60.0;
+                if last_rotary_settings != Some((speed, increment)) {
+                    rotary_arbiter.settings_changed(now);
+                    last_rotary_settings = Some((speed, increment));
+                }
+                let decision = rotary_arbiter.update(snapshot.buttons, &snapshot.mode, now);
+                snapshot.buttons = decision.buttons;
+                hal.apply_sim_angular(speed, increment, decision.angular_selected);
+            } else {
+                // Losing valid settings must not leave rotary inputs asserted.
+                let decision = rotary_arbiter.update(0, &snapshot.mode, now);
+                snapshot.buttons &= !(linc_panel::buttons::JOG_AP | linc_panel::buttons::JOG_AN
+                    | linc_panel::buttons::JOG_BP | linc_panel::buttons::JOG_BN
+                    | linc_panel::buttons::JOG_CP | linc_panel::buttons::JOG_CN);
+                hal.apply_sim_angular(0.0, 0.0, decision.angular_selected);
+            }
+        }
         if let Some(bus) = panel_bus.as_ref() {
             if let Ok(mut bus) = bus.lock() {
                 bus.publish(snapshot.clone());

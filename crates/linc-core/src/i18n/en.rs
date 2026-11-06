@@ -132,4 +132,6 @@ pub static EN_MESSAGES: &[(&str, &str)] = &[
     ("shell.badges.protect_tooltip", "Program Protect On — Editing, writes and offsets locked"),
     ("shell.badges.ext_change", "EXT CHANGE"),
     ("shell.badges.ext_change_tooltip", "Program Changed Externally — Unsaved buffer preserved"),
+    ("shell.top_bar.alarms", "Alarms (Click for Diagnostics)"),
+    ("shell.top_bar.messages", "Notifications & Messages (Click for Diagnostics)"),
 ];

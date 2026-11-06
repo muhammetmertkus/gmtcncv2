@@ -721,6 +721,21 @@ pub struct SimulationConfig {
     pub panel_title: Option<String>,
     #[serde(default)]
     pub panel_scale: Option<f64>,
+    /// Presentation overrides for existing simulated panel keys only.
+    #[serde(default)]
+    pub panel_keys: Vec<SimPanelKeyConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SimPanelKeyConfig {
+    pub name: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Fully resolved profile.
@@ -912,7 +927,7 @@ impl Profile {
 
     pub fn summary(&self) -> Vec<(String, String)> {
         let axes = self.machine_ini.coordinates.join("");
-        vec![
+        let mut summary = vec![
             ("Profile".into(), self.config.profile.clone()),
             ("Machine".into(), self.config.machine.name.clone()),
             (
@@ -965,7 +980,37 @@ impl Profile {
                     "off".into()
                 },
             ),
-        ]
+        ];
+        if !self.machine_ini.angular_increments.is_empty()
+            || !self.machine_ini.angular_increment_errors.is_empty()
+        {
+            summary.push((
+                "Angular INI".into(),
+                format!(
+                    "{} steps; {} invalid; default {}, max {} {}/s (INI values only)",
+                    self.machine_ini.angular_increments.len(),
+                    self.machine_ini.angular_increment_errors.len(),
+                    self.machine_ini.default_angular_velocity.map(|v| v.to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                    self.machine_ini.max_angular_velocity.map(|v| v.to_string())
+                        .unwrap_or_else(|| "unknown".into()),
+                    self.machine_ini.angular_units,
+                ),
+            ));
+            for axis in &self.machine_ini.axes {
+                if axis.axis_type != "ANGULAR" {
+                    continue;
+                }
+                let value = match self.machine_ini.angular_jog_plan(&axis.name) {
+                    Ok(plan) => format!("joint {}; default {}, max {} {}/s; {} steps (plan only)",
+                        plan.joint, plan.default_speed, plan.max_speed,
+                        self.machine_ini.angular_units, plan.increments.len()),
+                    Err(reason) => format!("unavailable: {reason}"),
+                };
+                summary.push((format!("Angular {}", axis.name), value));
+            }
+        }
+        summary
     }
 }
 
@@ -1092,6 +1137,23 @@ fn validate(config: &Config, ini: &MachineIni, profile_dir: &Path) -> Result<(),
     }
     if config.profile.trim().is_empty() {
         return Err(ConfigError::Invalid("profile must not be empty".into()));
+    }
+    let mut panel_names = std::collections::HashSet::new();
+    for key in &config.simulation.panel_keys {
+        if !crate::panel_buttons::BUTTON_PINS.iter().any(|(name, _)| *name == key.name)
+            || matches!(key.name.as_str(), "estop" | "program_protect" | "cycle_start" | "cycle_stop")
+        {
+            return Err(ConfigError::Invalid(format!("unknown or non-matrix simulation panel key {:?}", key.name)));
+        }
+        if !panel_names.insert(&key.name) {
+            return Err(ConfigError::Invalid(format!("duplicate simulation panel key {:?}", key.name)));
+        }
+        if key.label.as_ref().is_some_and(|label| label.trim().is_empty() || label.chars().count() > 24) {
+            return Err(ConfigError::Invalid(format!("simulation panel key {:?} label must contain 1–24 characters", key.name)));
+        }
+        if key.icon.as_deref().is_some_and(|icon| !matches!(icon, "panel" | "bulb" | "droplet" | "wind" | "stop")) {
+            return Err(ConfigError::Invalid(format!("unknown simulation panel icon for {:?}", key.name)));
+        }
     }
     if !matches!(
         config.ui.window_mode.as_str(),
@@ -1721,6 +1783,43 @@ mod tests {
             error,
             ConfigError::Toml { .. } | ConfigError::Invalid(_)
         ));
+    }
+
+    #[test]
+    fn simulator_key_customizations_validate_known_keys_and_icons() {
+        let dir = temp_dir();
+        write(&dir.path().join("base.toml"), base_config());
+        make_fixture(dir.path(), false);
+        let path = dir.path().join("sim.toml");
+        let prefix = r#"schema_version = 1
+profile = "sim"
+extends = "base.toml"
+[machine]
+name = "Test"
+kind = "sim"
+gui = "mill"
+linuxcnc_ini = "probe_basic.ini"
+[panel]
+kind = "simulated"
+label = "Sim panel"
+driver = "cnc-panel-sim"
+[panel.link]
+kind = "virtual"
+"#;
+        let item = "[[simulation.panel_keys]]\nname = \"worklamp\"\nlabel = \"Light\"\nicon = \"bulb\"\n";
+        write(&path, &format!("{prefix}{item}"));
+        let config = Profile::load(&path, None).unwrap();
+        assert_eq!(config.config.simulation.panel_keys[0].label.as_deref(), Some("Light"));
+        for invalid in [
+            "[[simulation.panel_keys]]\nname = \"unknown\"\n",
+            "[[simulation.panel_keys]]\nname = \"worklamp\"\nicon = \"bad\"\n",
+            "[[simulation.panel_keys]]\nname = \"worklamp\"\nlabel = \"\"\n",
+        ] {
+            write(&path, &format!("{prefix}{invalid}"));
+            assert!(Profile::load(&path, None).is_err(), "accepted {invalid}");
+        }
+        write(&path, &format!("{prefix}{item}{item}"));
+        assert!(Profile::load(&path, None).is_err());
     }
 
     #[test]

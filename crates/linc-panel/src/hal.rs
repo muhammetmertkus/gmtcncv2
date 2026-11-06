@@ -40,12 +40,25 @@ pub struct CncPanelHal {
     home_state_z: HalPin,
     communication_error: HalPin,
     panel_connected: HalPin,
+    angular: Option<AngularPins>,
+}
+
+struct AngularPins {
+    speed: HalPin,
+    increment: HalPin,
+    select: HalPin,
+    ready: HalPin,
 }
 
 unsafe impl Send for CncPanelHal {}
 
 impl CncPanelHal {
     pub fn new() -> Result<Self, HalError> {
+        Self::new_with_sim_angular(false)
+    }
+
+    /// Extra pins exist only when the simulator has validated its active INI.
+    pub fn new_with_sim_angular(enable_angular: bool) -> Result<Self, HalError> {
         let name =
             std::env::var("LINC_PANEL_COMPONENT").unwrap_or_else(|_| "cnc_panel".to_string());
         let component = HalComponent::new(&name)?;
@@ -99,6 +112,14 @@ impl CncPanelHal {
         let home_state_z = component.s32_in("home_state_z")?;
         let communication_error = component.bit_out("communication_error")?;
         let panel_connected = component.bit_out("panel_connected")?;
+        let angular = if enable_angular {
+            Some(AngularPins {
+                speed: component.float_out("sim_angular_speed")?,
+                increment: component.float_out("sim_angular_increment")?,
+                select: component.bit_out("sim_angular_select")?,
+                ready: component.bit_in("sim_angular_ready")?,
+            })
+        } else { None };
         unsafe {
             *feed_override.float() = 1.0;
             *rapid_override.float() = 1.0;
@@ -116,6 +137,12 @@ impl CncPanelHal {
             *home_state_z.s32() = 0;
             *communication_error.bit() = 1;
             *panel_connected.bit() = 0;
+            if let Some(pins) = &angular {
+                *pins.speed.float() = 0.0;
+                *pins.increment.float() = 0.0;
+                *pins.select.bit() = 0;
+                *pins.ready.bit() = 0;
+            }
         }
         component.ready()?;
         log::info!(
@@ -150,7 +177,20 @@ impl CncPanelHal {
             home_state_z,
             communication_error,
             panel_connected,
+            angular,
         })
+    }
+
+    /// Settings are published before button outputs. The rate arbiter keeps
+    /// jog buttons low across selector/settings changes and settling cycles.
+    pub fn apply_sim_angular(&mut self, speed_per_minute: f64, increment: f64, angular: bool) {
+        if let Some(pins) = &self.angular {
+            unsafe {
+                *pins.speed.float() = speed_per_minute;
+                *pins.increment.float() = increment;
+                *pins.select.bit() = angular as u8;
+            }
+        }
     }
 
     pub fn component_id(&self) -> i32 {

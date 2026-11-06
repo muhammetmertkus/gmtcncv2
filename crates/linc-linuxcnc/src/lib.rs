@@ -70,6 +70,7 @@ pub struct NmlBackend {
     nml_lost_reported: bool,
     pending_restore: Option<NmlTaskMode>,
     pending_restore_at: Instant,
+    sim_restore_quiet_at: Option<Instant>,
     pending_height_comp: Option<(u16, Instant)>,
     offsets_synced: bool,
     offset_sync_attempts: u32,
@@ -192,6 +193,7 @@ impl NmlBackend {
             nml_lost_reported: false,
             pending_restore: None,
             pending_restore_at: Instant::now(),
+            sim_restore_quiet_at: None,
             pending_height_comp: None,
             offsets_synced: false,
             offset_sync_attempts: 0,
@@ -226,7 +228,7 @@ impl NmlBackend {
 
         let panel = self.panel.read(self.hal.as_ref(), &self.profile);
         let spindles = self.read_spindles(&status, &panel);
-        self.poll_restore();
+        self.poll_restore(&panel);
         self.poll_height_comp(&panel);
         self.sync_work_offsets(&status, &panel);
 
@@ -502,7 +504,7 @@ impl NmlBackend {
         rows
     }
 
-    fn poll_restore(&mut self) {
+    fn poll_restore(&mut self, panel: &PanelState) {
         let Some(previous) = self.pending_restore else {
             return;
         };
@@ -512,12 +514,63 @@ impl NmlBackend {
         let Ok(status) = self.client.poll_status() else {
             return;
         };
+        if self.profile.config.machine.kind == "sim" {
+            if status.task.mode == previous {
+                self.pending_restore = None;
+                self.sim_restore_quiet_at = None;
+                return;
+            }
+            // Respect a changed selector; do not restore a stale mode over a
+            // newer explicit AUTO or MDI request.
+            let selected = match panel.mode.mode() {
+                Some(PanelMode::Auto) => Some(NmlTaskMode::Auto),
+                Some(PanelMode::Mdi) => Some(NmlTaskMode::Mdi),
+                Some(PanelMode::Jog | PanelMode::Inc | PanelMode::Mpg | PanelMode::Home) => Some(NmlTaskMode::Manual),
+                Some(PanelMode::Edit | PanelMode::ProgHome) => Some(previous),
+                _ => None,
+            };
+            if selected.is_some_and(|mode| mode != previous) {
+                self.pending_restore = None;
+                self.sim_restore_quiet_at = None;
+                return;
+            }
+            let idle = panel.connected && !panel.communication_error && selected.is_some()
+                && status.task.state == NmlTaskState::On
+                && status.task.interp_state == linuxcnc_nml::InterpState::Idle
+                && !status.motion.probing && status.motion.inpos && !status.io.jogging_active
+                && self.sim_jog_keys_released();
+            if !idle {
+                self.sim_restore_quiet_at = None;
+                return;
+            }
+            let now = Instant::now();
+            let since = *self.sim_restore_quiet_at.get_or_insert(now);
+            if now.duration_since(since) < Duration::from_millis(400) {
+                return;
+            }
+            if let Err(error) = self.client.send(&NmlCommand::SetMode(previous)) {
+                log::warn!("could not restore the simulated panel task mode: {error}");
+            }
+            // The task may acknowledge and still refuse a mode switch. Keep
+            // the request pending until a later status poll confirms it.
+            self.pending_restore_at = now;
+            self.sim_restore_quiet_at = None;
+            return;
+        }
         if status.task.interp_state == linuxcnc_nml::InterpState::Idle && !status.motion.probing {
             if let Err(error) = self.client.send(&NmlCommand::SetMode(previous)) {
                 log::warn!("could not restore the panel task mode: {error}");
             }
             self.pending_restore = None;
         }
+    }
+
+    fn sim_jog_keys_released(&self) -> bool {
+        let Some(hal) = self.hal.as_ref() else { return false; };
+        let prefix = &self.profile.config.hal.panel_component;
+        ["jog_xp", "jog_xn", "jog_yp", "jog_yn", "jog_zp", "jog_zn",
+         "jog_ap", "jog_an", "jog_bp", "jog_bn"]
+            .iter().all(|name| hal.bit(&format!("{prefix}.{name}")) == Some(false))
     }
 
     fn poll_height_comp(&mut self, panel: &PanelState) {
@@ -759,6 +812,7 @@ impl NmlBackend {
                 _ => None,
             };
             self.pending_restore_at = Instant::now();
+            self.sim_restore_quiet_at = None;
         }
         for block in blocks {
             self.nml_send(&NmlCommand::Mdi(block.clone()))?;
@@ -1545,6 +1599,7 @@ impl NmlBackend {
                 self.builder.clear_probe_trip();
                 self.builder.fail_probe();
                 self.pending_restore = None;
+                self.sim_restore_quiet_at = None;
                 self.pending_height_comp = None;
                 Ok(())
             }

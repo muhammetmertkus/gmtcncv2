@@ -131,6 +131,7 @@ stage() {
         "$stage_dir/usr/share/applications/linc.desktop"
     install -m644 README.md "$stage_dir/usr/share/doc/linc/README.md"
     install -m644 debian/copyright "$stage_dir/usr/share/doc/linc/copyright"
+    install -m644 assets/panel-icons/tabler/LICENSE "$stage_dir/usr/share/doc/linc/tabler-icons-LICENSE"
 
     local installed_kb
     installed_kb=$(du -sk "$stage_dir/usr" | cut -f1)

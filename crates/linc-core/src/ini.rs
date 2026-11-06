@@ -120,6 +120,65 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
+/// Read explicit angular steps without silently converting an invalid value to
+/// zero (continuous). Values are kept separate from linear INCREMENTS.
+fn parse_angular_increments(raw: &str) -> (Vec<(String, f64)>, Vec<String>) {
+    let mut entries: Vec<String> = Vec::new();
+    if raw.contains(',') {
+        entries.extend(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+        );
+    } else {
+        for token in raw.split_whitespace() {
+            if matches!(token.to_ascii_lowercase().as_str(), "deg" | "rad" | "grad")
+                && !entries.is_empty()
+            {
+                entries.last_mut().unwrap().push_str(&format!(" {token}"));
+            } else {
+                entries.push(token.to_owned());
+            }
+        }
+    }
+    let mut valid = Vec::new();
+    let mut errors = Vec::new();
+    for label in entries {
+        let value = label.trim().to_ascii_lowercase();
+        if matches!(value.as_str(), "continuous" | "jog") {
+            continue;
+        }
+        let (number, scale) = if let Some(n) = value.strip_suffix("grad") {
+            (n.trim(), Some(0.9))
+        } else if let Some(n) = value.strip_suffix("rad") {
+            (n.trim(), Some(180.0 / std::f64::consts::PI))
+        } else if let Some(n) = value.strip_suffix("deg") {
+            (n.trim(), Some(1.0))
+        } else {
+            // AXIS and QtVCP interpret unitless angular increments as degrees.
+            (value.as_str(), Some(1.0))
+        };
+        let number = if let Some((numerator, denominator)) = number.split_once('/') {
+            numerator
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .zip(denominator.trim().parse::<f64>().ok())
+                .filter(|(n, d)| n.is_finite() && d.is_finite() && *d != 0.0)
+                .map(|(n, d)| n / d)
+        } else {
+            number.parse::<f64>().ok()
+        };
+        match number.zip(scale).map(|(n, scale)| n * scale) {
+            Some(n) if n.is_finite() && n > 0.0 => valid.push((label, n)),
+            Some(0.0) => {}
+            _ => errors.push(label),
+        }
+    }
+    (valid, errors)
+}
+
 fn resolve_ini_path(base: &Path, value: &str) -> PathBuf {
     let expanded = expand_tilde(value.trim());
     if expanded.is_absolute() {
@@ -146,6 +205,10 @@ pub fn expand_tilde(value: &str) -> PathBuf {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AxisIni {
     pub name: String,
+    /// AXIS TYPE as declared, or LinuxCNC's usual ABC angular default.
+    pub axis_type: String,
+    /// AXIS MAX_VELOCITY without the legacy JOINT fallback.
+    pub declared_max_velocity: Option<f64>,
     pub min_limit: f64,
     pub max_limit: f64,
     pub max_velocity: f64,
@@ -159,6 +222,43 @@ pub struct AxisIni {
     pub home_is_shared: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JointJogIni {
+    pub joint_type: String,
+    pub max_velocity: Option<f64>,
+}
+
+/// Validated settings only. Constructing a plan never issues motion or HAL writes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AngularJogPlan {
+    pub axis: String,
+    pub joint: usize,
+    pub default_speed: f64,
+    pub max_speed: f64,
+    /// Positive increments in machine angular units, not linear machine units.
+    pub increments: Vec<(String, f64)>,
+}
+
+impl AngularJogPlan {
+    /// halui jog speed is expressed in machine units/minute. Clamp the
+    /// requested override before converting; invalid values never become motion.
+    pub fn hal_speed(&self, override_ratio: f64) -> Result<f64, String> {
+        if !override_ratio.is_finite() || override_ratio < 0.0 {
+            return Err("invalid angular speed override".into());
+        }
+        if !self.default_speed.is_finite() || self.default_speed <= 0.0
+            || !self.max_speed.is_finite() || self.max_speed <= 0.0
+        {
+            return Err("invalid angular speed limits".into());
+        }
+        let speed = (self.default_speed * override_ratio).min(self.max_speed) * 60.0;
+        if !speed.is_finite() {
+            return Err("angular speed overflow".into());
+        }
+        Ok(speed)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MachineIni {
     pub path: PathBuf,
@@ -170,6 +270,7 @@ pub struct MachineIni {
     pub linear_units: String,
     pub angular_units: String,
     pub axes: Vec<AxisIni>,
+    pub joint_jog: Vec<JointJogIni>,
     pub spindles: usize,
     pub max_spindle_speed: f64,
     pub min_spindle_override: f64,
@@ -187,11 +288,98 @@ pub struct MachineIni {
     pub subroutine_paths: Vec<PathBuf>,
     pub no_force_homing: bool,
     pub increments: Vec<(String, f64)>,
+    /// Explicit [DISPLAY] ANGULAR_INCREMENTS, converted to degrees. Invalid
+    /// entries are reported separately and must not be used to enable jogging.
+    pub angular_increments: Vec<(String, f64)>,
+    pub angular_increment_errors: Vec<String>,
+    /// Angular jog velocities in machine angular units/second, with DISPLAY taking priority
+    /// over TRAJ as in AXIS. None means missing, invalid or non-positive.
+    pub default_angular_velocity: Option<f64>,
+    pub max_angular_velocity: Option<f64>,
     pub default_linear_velocity: f64,
     pub max_linear_velocity: f64,
 }
 
 impl MachineIni {
+    /// Prepare angular jog settings for an explicitly mapped trivkins axis.
+    /// Complex/ambiguous kinematics must be handled by a dedicated mapping,
+    /// not guessed from coordinate order.
+    pub fn angular_jog_plan(&self, name: &str) -> Result<AngularJogPlan, String> {
+        let name = name.to_ascii_uppercase();
+        if name.chars().count() != 1 || !self.coordinates.contains(&name) {
+            return Err(format!("axis {name} is not configured"));
+        }
+        let kin = self.kinematics.to_ascii_lowercase();
+        let mut words = kin.split_whitespace();
+        if words.next() != Some("trivkins") {
+            return Err("angular jog requires an explicit trivkins mapping".into());
+        }
+        let mapping = words
+            .find_map(|word| word.strip_prefix("coordinates="))
+            .ok_or("trivkins coordinates are not explicit")?
+            .to_ascii_uppercase();
+        let letters: Vec<String> = mapping.chars().map(|ch| ch.to_string()).collect();
+        let unique: std::collections::HashSet<_> = letters.iter().collect();
+        if letters.len() != self.joints
+            || unique.len() != letters.len()
+            || letters
+                .iter()
+                .any(|letter| !self.coordinates.contains(letter))
+            || self.coordinates.iter().any(|letter| !letters.contains(letter))
+        {
+            return Err("ambiguous or inconsistent axis-to-joint mapping".into());
+        }
+        let joint = letters
+            .iter()
+            .position(|letter| letter == &name)
+            .ok_or("axis has no mapped joint")?;
+        let axis = self.axis(&name).ok_or("axis settings missing")?;
+        let joint_ini = self.joint_jog.get(joint).ok_or("joint settings missing")?;
+        if axis.axis_type != "ANGULAR" || joint_ini.joint_type != "ANGULAR" {
+            return Err("axis or joint is not angular".into());
+        }
+        let positive = |value: Option<f64>| value.filter(|v| v.is_finite() && *v > 0.0);
+        let display_max =
+            positive(self.max_angular_velocity).ok_or("angular jog maximum missing or invalid")?;
+        let axis_max = positive(axis.declared_max_velocity)
+            .ok_or("axis maximum velocity missing or invalid")?;
+        let joint_max =
+            positive(joint_ini.max_velocity).ok_or("joint maximum velocity missing or invalid")?;
+        let default_speed = positive(self.default_angular_velocity)
+            .ok_or("angular jog default velocity missing or invalid")?;
+        let max_speed = display_max.min(axis_max).min(joint_max);
+        if !self.angular_increment_errors.is_empty() {
+            return Err(format!(
+                "invalid angular increments: {}",
+                self.angular_increment_errors.join(", ")
+            ));
+        }
+        let units_per_degree = match self.angular_units.as_str() {
+            "deg" | "degree" => 1.0,
+            "rad" | "radian" => std::f64::consts::PI / 180.0,
+            "grad" | "gon" => 10.0 / 9.0,
+            _ => return Err("unsupported machine angular units".into()),
+        };
+        let increments = self
+            .angular_increments
+            .iter()
+            .map(|(label, degrees)| (label.clone(), degrees * units_per_degree))
+            .collect::<Vec<_>>();
+        if increments
+            .iter()
+            .any(|(_, value)| !value.is_finite() || *value <= 0.0)
+        {
+            return Err("invalid angular increment after conversion".into());
+        }
+        Ok(AngularJogPlan {
+            axis: name,
+            joint,
+            default_speed: default_speed.min(max_speed),
+            max_speed,
+            increments,
+        })
+    }
+
     pub fn parse_file(path: &Path) -> Result<Self, IniError> {
         let text = std::fs::read_to_string(path).map_err(|source| IniError::Read {
             path: path.to_path_buf(),
@@ -267,6 +455,16 @@ impl MachineIni {
                 .unwrap_or(0);
             axes.push(AxisIni {
                 name: name.clone(),
+                axis_type: axis_section
+                    .and_then(|section| section.get("TYPE"))
+                    .unwrap_or(if matches!(name.as_str(), "A" | "B" | "C") {
+                        "ANGULAR"
+                    } else {
+                        "LINEAR"
+                    })
+                    .to_ascii_uppercase(),
+                declared_max_velocity: axis_section
+                    .and_then(|section| section.get_f64("MAX_VELOCITY")),
                 min_limit: get("MIN_LIMIT").unwrap_or(0.0),
                 max_limit: get("MAX_LIMIT").unwrap_or(0.0),
                 max_velocity: get("MAX_VELOCITY").unwrap_or(0.0),
@@ -280,6 +478,18 @@ impl MachineIni {
                 home_is_shared: get_bool("HOME_IS_SHARED").unwrap_or(false),
             });
         }
+        let joint_jog = (0..joints)
+            .map(|index| {
+                let section = ini.section(&format!("JOINT_{index}"));
+                JointJogIni {
+                    joint_type: section
+                        .and_then(|s| s.get("TYPE"))
+                        .unwrap_or("LINEAR")
+                        .to_ascii_uppercase(),
+                    max_velocity: section.and_then(|s| s.get_f64("MAX_VELOCITY")),
+                }
+            })
+            .collect();
 
         let tool_table_value = ini
             .get("EMCIO", "TOOL_TABLE")
@@ -339,6 +549,21 @@ impl MachineIni {
             })
             .unwrap_or_default();
 
+        let angular_units = ini
+            .get("TRAJ", "ANGULAR_UNITS")
+            .unwrap_or("degree")
+            .to_ascii_lowercase();
+        let (angular_increments, angular_increment_errors) = ini
+            .get("DISPLAY", "ANGULAR_INCREMENTS")
+            .map(parse_angular_increments)
+            .unwrap_or_default();
+        let angular_velocity = |name| {
+            ini.get("DISPLAY", name)
+                .or_else(|| ini.get("TRAJ", name))
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+        };
+
         Ok(Self {
             path: path.to_path_buf(),
             config_dir,
@@ -350,11 +575,9 @@ impl MachineIni {
                 .get("TRAJ", "LINEAR_UNITS")
                 .unwrap_or("mm")
                 .to_ascii_lowercase(),
-            angular_units: ini
-                .get("TRAJ", "ANGULAR_UNITS")
-                .unwrap_or("degree")
-                .to_ascii_lowercase(),
+            angular_units,
             axes,
+            joint_jog,
             spindles: ini.get_u32("TRAJ", "SPINDLES").unwrap_or(1).max(1) as usize,
             max_spindle_speed: ini.get_f64("DISPLAY", "MAX_SPINDLE_SPEED").unwrap_or(0.0),
             min_spindle_override: ini
@@ -376,6 +599,10 @@ impl MachineIni {
                 .map(|value| value.trim() == "0")
                 .unwrap_or(false),
             increments,
+            angular_increments,
+            angular_increment_errors,
+            default_angular_velocity: angular_velocity("DEFAULT_ANGULAR_VELOCITY"),
+            max_angular_velocity: angular_velocity("MAX_ANGULAR_VELOCITY"),
             default_linear_velocity: ini
                 .get_f64("TRAJ", "DEFAULT_LINEAR_VELOCITY")
                 .unwrap_or(0.0),
@@ -500,6 +727,100 @@ HOME_USE_INDEX = YES
                 (".01mm".to_string(), 0.01),
             ]
         );
+    }
+
+    #[test]
+    fn angular_settings_are_separate_from_linear_steps_and_use_display_priority() {
+        let source = format!("{SIM}\n[DISPLAY]\nANGULAR_INCREMENTS = 1 5 10 30 45 90 180 360\nDEFAULT_ANGULAR_VELOCITY = 36\nMAX_ANGULAR_VELOCITY = 360\n[TRAJ]\nDEFAULT_ANGULAR_VELOCITY = 60\nMAX_ANGULAR_VELOCITY = 100\n");
+        let ini = MachineIni::parse(Path::new("/tmp/sim.ini"), &source).unwrap();
+        assert_eq!(ini.angular_increments.len(), 8);
+        assert_eq!(ini.angular_increments[0], ("1".to_string(), 1.0));
+        assert_eq!(ini.default_angular_velocity, Some(36.0));
+        assert_eq!(ini.max_angular_velocity, Some(360.0));
+        assert_eq!(ini.increments[1], ("10mm".to_string(), 10.0));
+        assert!(ini.angular_increment_errors.is_empty());
+    }
+
+    #[test]
+    fn angular_steps_convert_units_and_report_invalid_entries() {
+        let (steps, errors) = parse_angular_increments(
+            "continuous, 1/2 deg, 1 rad, 10 grad, 2mm, -1, nan, 1/0, 1/inf",
+        );
+        assert_eq!(steps[0], ("1/2 deg".to_string(), 0.5));
+        assert!((steps[1].1 - 180.0 / std::f64::consts::PI).abs() < 1e-9);
+        assert_eq!(steps[2], ("10 grad".to_string(), 9.0));
+        assert_eq!(errors, ["2mm", "-1", "nan", "1/0", "1/inf"]);
+        let (steps, errors) = parse_angular_increments("1 rad 20 deg 5");
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[2].1, 5.0);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn angular_velocity_does_not_hide_invalid_display_values_with_fallbacks() {
+        let source = format!("{SIM}\n[DISPLAY]\nMAX_ANGULAR_VELOCITY = nan\n[TRAJ]\nMAX_ANGULAR_VELOCITY = 90\nDEFAULT_ANGULAR_VELOCITY = 12\n");
+        let ini = MachineIni::parse(Path::new("/tmp/sim.ini"), &source).unwrap();
+        assert_eq!(ini.max_angular_velocity, None);
+        assert_eq!(ini.default_angular_velocity, Some(12.0));
+    }
+
+    #[test]
+    fn five_axis_profile_exposes_its_angular_settings() {
+        let ini = MachineIni::parse(
+            Path::new("configs/sim-5axis.ini"),
+            include_str!("../../../configs/sim-5axis.ini"),
+        )
+        .unwrap();
+        assert_eq!(ini.angular_increments.len(), 8);
+        assert!(ini.angular_increment_errors.is_empty());
+        assert_eq!(ini.default_angular_velocity, Some(36.0));
+        assert_eq!(ini.max_angular_velocity, Some(360.0));
+        let a = ini.angular_jog_plan("A").unwrap();
+        let b = ini.angular_jog_plan("B").unwrap();
+        assert_eq!((a.joint, b.joint), (3, 4));
+        assert_eq!(a.hal_speed(1.0).unwrap(), 2160.0);
+        assert_eq!(a.hal_speed(100.0).unwrap(), 21600.0);
+        assert!(a.hal_speed(f64::NAN).is_err());
+        assert!(a.hal_speed(-1.0).is_err());
+        assert_eq!(a.increments[0].1, 1.0);
+        assert!(ini.angular_jog_plan("X").is_err());
+    }
+
+    #[test]
+    fn angular_jog_plan_rejects_ambiguous_and_invalid_configurations() {
+        let source = include_str!("../../../configs/sim-5axis.ini");
+        let parse = |text: &str| MachineIni::parse(Path::new("configs/test.ini"), text).unwrap();
+        let mut ini = parse(source);
+        ini.kinematics = "trivkins coordinates=XYYAB".into();
+        assert!(ini.angular_jog_plan("A").is_err());
+        ini.kinematics = "otherkins coordinates=XYZAB".into();
+        assert!(ini.angular_jog_plan("A").is_err());
+        let mut ini = parse(source);
+        ini.coordinates.push("C".into());
+        assert!(ini.angular_jog_plan("A").is_err());
+        let mut ini = parse(source);
+        ini.joint_jog[3].max_velocity = Some(4.0);
+        let a = ini.angular_jog_plan("A").unwrap();
+        assert_eq!(a.max_speed, 4.0);
+        assert_eq!(a.hal_speed(1.0).unwrap(), 240.0);
+        ini.joint_jog[3].joint_type = "LINEAR".into();
+        assert!(ini.angular_jog_plan("A").is_err());
+        let mut ini = parse(source);
+        ini.axes
+            .iter_mut()
+            .find(|axis| axis.name == "A")
+            .unwrap()
+            .declared_max_velocity = None;
+        assert!(ini.angular_jog_plan("A").is_err());
+        let mut ini = parse(source);
+        ini.angular_units = "unknown".into();
+        assert!(ini.angular_jog_plan("A").is_err());
+        let mut ini = parse(source);
+        ini.angular_units = "radian".into();
+        let a = ini.angular_jog_plan("A").unwrap();
+        assert!((a.increments[0].1 - std::f64::consts::PI / 180.0).abs() < 1e-12);
+        ini.angular_increment_errors.push("bad".into());
+        assert!(ini.angular_jog_plan("A").is_err());
     }
 
     #[test]

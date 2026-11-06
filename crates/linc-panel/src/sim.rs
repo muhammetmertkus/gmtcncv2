@@ -85,12 +85,16 @@ pub struct SimPanelState {
     pub feed_override: f64,
     pub rapid_override: f64,
     pub spindle_override: f64,
+    pub angular_jog: Option<AngularSimSettings>,
     pub program_protect: bool,
     /// Simulated probe contact. Asserted only while the panel PROBE key is held.
     pub probe: bool,
     /// Remote probe hold expires independently of the local panel window.
     pub remote_probe_until: Option<Instant>,
     pub buttons: u64,
+    /// Conflicting jog requests were pressed together. Keep all jog outputs
+    /// inhibited until every jog key is released; never resume on one release.
+    pub mixed_jog_interlock: bool,
     pub leds: u64,
     pub sseg_tool: i32,
     pub sseg_next_tool: i32,
@@ -101,6 +105,18 @@ pub struct SimPanelState {
     /// Buttons a remote caller pressed with a deadline, so a held key is
     /// released even if the caller never does.
     pub holds: Vec<(u64, Instant)>,
+}
+
+/// Validated, simulation-only settings. These values do not by themselves
+/// create a HAL output or make an axis movable.
+#[derive(Clone, Debug)]
+pub struct AngularSimSettings {
+    pub speed: f64,
+    pub default_speed: f64,
+    pub max_speed: f64,
+    pub units: String,
+    pub increments: Vec<(String, f64)>,
+    pub increment_index: usize,
 }
 
 /// How far through its power-up sequence a simulated cabinet starts.
@@ -174,10 +190,12 @@ impl Default for SimPanelState {
             feed_override: 1.0,
             rapid_override: 1.0,
             spindle_override: 1.0,
+            angular_jog: None,
             program_protect: false,
             probe: false,
             remote_probe_until: None,
             buttons: 0,
+            mixed_jog_interlock: false,
             leds: 0,
             sseg_tool: 12,
             sseg_next_tool: 0,
@@ -191,6 +209,47 @@ impl Default for SimPanelState {
 }
 
 impl SimPanelState {
+    /// Build a single conservative setting shared by the simulator's rotary
+    /// keys. Unsupported/ambiguous axes leave the control unavailable.
+    pub fn configure_angular_jog(&mut self, ini: &linc_core::ini::MachineIni) {
+        self.angular_jog = None;
+        let angular_axes: Vec<_> = ini.axes.iter().filter(|axis| axis.axis_type == "ANGULAR").collect();
+        if angular_axes.is_empty() || angular_axes.iter().any(|axis| !matches!(axis.name.as_str(), "A" | "B" | "C")) {
+            return;
+        }
+        let plans: Option<Vec<_>> = angular_axes.iter().map(|axis| ini.angular_jog_plan(&axis.name).ok()).collect();
+        let Some(plans) = plans else { return; };
+        let Some(first) = plans.first() else { return; };
+        if first.increments.is_empty() || plans.iter().any(|plan| plan.increments != first.increments) {
+            return;
+        }
+        let max_speed = plans.iter().map(|plan| plan.max_speed).fold(f64::INFINITY, f64::min);
+        let speed = plans.iter().map(|plan| plan.default_speed).fold(max_speed, f64::min);
+        self.angular_jog = Some(AngularSimSettings {
+            speed, default_speed: speed, max_speed, units: ini.angular_units.clone(),
+            increments: first.increments.clone(), increment_index: 0,
+        });
+    }
+
+    fn update_mixed_jog_interlock(&mut self) {
+        let linear = buttons::JOG_XP | buttons::JOG_XN | buttons::JOG_YP
+            | buttons::JOG_YN | buttons::JOG_ZP | buttons::JOG_ZN;
+        let angular = buttons::JOG_AP | buttons::JOG_AN | buttons::JOG_BP
+            | buttons::JOG_BN | buttons::JOG_CP | buttons::JOG_CN;
+        let pressed = self.buttons & (linear | angular);
+        if pressed == 0 {
+            self.mixed_jog_interlock = false;
+        } else if matches!(self.mode, PanelMode::Jog | PanelMode::Inc)
+            && ((pressed & linear != 0 && pressed & angular != 0)
+                || [
+                    (buttons::JOG_XP, buttons::JOG_XN), (buttons::JOG_YP, buttons::JOG_YN),
+                    (buttons::JOG_ZP, buttons::JOG_ZN), (buttons::JOG_AP, buttons::JOG_AN),
+                    (buttons::JOG_BP, buttons::JOG_BN), (buttons::JOG_CP, buttons::JOG_CN),
+                ].iter().any(|(plus, minus)| pressed & plus != 0 && pressed & minus != 0)) {
+            self.mixed_jog_interlock = true;
+        }
+    }
+
     pub fn set_button(&mut self, mask: u64, pressed: bool) {
         if pressed {
             self.buttons |= mask;
@@ -260,6 +319,21 @@ impl SimPanelState {
         press: u64,
         release: u64,
     ) -> Result<(), DiagError> {
+        if patch.angular_jog_speed.is_some() || patch.angular_jog_increment_index.is_some() {
+            let jog_keys = buttons::JOG_XP | buttons::JOG_XN | buttons::JOG_YP | buttons::JOG_YN
+                | buttons::JOG_ZP | buttons::JOG_ZN | buttons::JOG_AP | buttons::JOG_AN
+                | buttons::JOG_BP | buttons::JOG_BN | buttons::JOG_CP | buttons::JOG_CN;
+            if (self.buttons | press) & jog_keys != 0 {
+                return Err(DiagError::invalid_argument("release all jog keys before changing angular settings"));
+            }
+            let settings = self.angular_jog.as_ref().ok_or_else(|| DiagError::invalid_argument("angular jog settings unavailable"))?;
+            if patch.angular_jog_speed.is_some_and(|speed| !speed.is_finite() || speed <= 0.0 || speed > settings.max_speed) {
+                return Err(DiagError::invalid_argument("angular jog speed is outside the configured limit"));
+            }
+            if patch.angular_jog_increment_index.is_some_and(|index| index >= settings.increments.len()) {
+                return Err(DiagError::invalid_argument("angular jog increment index is invalid"));
+            }
+        }
         if let Some(key) = patch.power_key.as_deref() {
             if patch.power.is_some() || !matches!(key, "on" | "off") {
                 return Err(DiagError::invalid_argument(
@@ -284,6 +358,10 @@ impl SimPanelState {
         if let Some(value) = patch.spindle_override {
             check_override("spindle_override", value)?;
             self.spindle_override = value;
+        }
+        if let Some(settings) = self.angular_jog.as_mut() {
+            if let Some(speed) = patch.angular_jog_speed { settings.speed = speed; }
+            if let Some(index) = patch.angular_jog_increment_index { settings.increment_index = index; }
         }
         if let Some(protect) = patch.program_protect {
             self.program_protect = protect;
@@ -378,6 +456,7 @@ impl SimPanelHandle {
     pub fn set(&self, update: impl FnOnce(&mut SimPanelState)) {
         if let Ok(mut state) = self.state.lock() {
             update(&mut state);
+            state.update_mixed_jog_interlock();
         }
     }
 
@@ -453,10 +532,21 @@ impl SimControlState {
 
     fn state_value(&self) -> Value {
         let state = self.handle.snapshot();
+        let disconnected = self.disconnected_buttons();
+        let rotary_wired = {
+            let wiring = self.wiring.lock().unwrap_or_else(|poison| poison.into_inner());
+            let component = std::env::var("LINC_PANEL_COMPONENT").unwrap_or_else(|_| "cnc_panel".into());
+            wiring.use_hal && wiring.reader.as_ref().is_some_and(|hal| {
+                hal.bit(&format!("{component}.sim_angular_ready")) == Some(true)
+                    && ["sim_angular_speed", "sim_angular_increment", "sim_angular_select",
+                        "jog_ap", "jog_an", "jog_bp", "jog_bn"]
+                        .iter().all(|name| hal.connected(&format!("{component}.{name}")) == Some(true))
+            })
+        };
         json!({
             "connected": state.connected,
             "probe_enabled": self.probe_enabled,
-            "disconnected_buttons": self.disconnected_buttons(),
+            "disconnected_buttons": disconnected,
             "error": state.error,
             "estop": state.estop,
             "power": state.power,
@@ -464,8 +554,15 @@ impl SimControlState {
             "feed_override": state.feed_override,
             "rapid_override": state.rapid_override,
             "spindle_override": state.spindle_override,
+            "angular_jog": state.angular_jog.as_ref().map(|settings| json!({
+                "speed": settings.speed, "max_speed": settings.max_speed,
+                "units": settings.units, "increments": settings.increments,
+                "increment_index": settings.increment_index,
+                "wired": rotary_wired,
+            })),
             "program_protect": state.program_protect,
             "buttons": state.buttons,
+            "mixed_jog_interlock": state.mixed_jog_interlock,
             "buttons_hex": format!("0x{:016x}", state.buttons),
             "pressed": pressed_button_names(state.buttons),
             "leds": state.leds,
@@ -584,7 +681,13 @@ impl linc_diag::SimControl for SimControlState {
 
     fn reset(&self) -> Result<Value, DiagError> {
         self.handle.set(|state| {
+            let angular = state.angular_jog.clone().map(|mut settings| {
+                settings.speed = settings.default_speed;
+                settings.increment_index = 0;
+                settings
+            });
             *state = SimPanelState::default();
+            state.angular_jog = angular;
         });
         Ok(self.state_value())
     }
@@ -649,6 +752,12 @@ impl SimPanelDriver {
         let y = active(buttons::JOG_YP) || active(buttons::JOG_YN);
         let z = active(buttons::JOG_ZP) || active(buttons::JOG_ZN);
         let mut visible_buttons = state.buttons;
+        if state.mixed_jog_interlock {
+            visible_buttons &= !(buttons::JOG_XP | buttons::JOG_XN | buttons::JOG_YP
+                | buttons::JOG_YN | buttons::JOG_ZP | buttons::JOG_ZN
+                | buttons::JOG_AP | buttons::JOG_AN | buttons::JOG_BP
+                | buttons::JOG_BN | buttons::JOG_CP | buttons::JOG_CN);
+        }
         if home_active || proghome_active {
             visible_buttons &= !(buttons::RAPID
                 | buttons::JOG_XP
@@ -3449,6 +3558,95 @@ mod tests {
         let snapshot = driver.poll().unwrap();
         assert_eq!(snapshot.buttons & buttons::CYCLE_START, 0);
         assert!(handle.snapshot().holds.is_empty());
+    }
+
+    #[test]
+    fn mixed_linear_and_angular_jog_stays_inhibited_until_all_released() {
+        let handle = SimPanelHandle::new();
+        let mut driver = SimPanelDriver::new(handle.clone(), Duration::from_millis(1));
+        handle.set(|s| { s.mode = PanelMode::Jog; s.set_button(buttons::JOG_XP, true); });
+        assert_ne!(driver.poll().unwrap().buttons & buttons::JOG_XP, 0);
+        handle.set(|s| s.set_button(buttons::JOG_AP, true));
+        assert!(handle.snapshot().mixed_jog_interlock);
+        assert_eq!(driver.poll().unwrap().buttons & (buttons::JOG_XP | buttons::JOG_AP), 0);
+        handle.set(|s| s.set_button(buttons::JOG_AP, false));
+        assert!(handle.snapshot().mixed_jog_interlock);
+        assert_eq!(driver.poll().unwrap().buttons & buttons::JOG_XP, 0);
+        handle.set(|s| s.set_button(buttons::JOG_XP, false));
+        assert!(!handle.snapshot().mixed_jog_interlock);
+        handle.set(|s| s.set_button(buttons::JOG_AP, true));
+        assert_ne!(driver.poll().unwrap().buttons & buttons::JOG_AP, 0);
+    }
+
+    #[test]
+    fn mixed_jog_interlock_applies_to_inc_and_expires_with_timed_holds() {
+        let handle = SimPanelHandle::new();
+        handle.set(|s| {
+            s.mode = PanelMode::Inc;
+            s.press_for(buttons::JOG_ZN, Duration::from_millis(5));
+            s.press_for(buttons::JOG_BN, Duration::from_millis(5));
+        });
+        assert!(handle.snapshot().mixed_jog_interlock);
+        let mut driver = SimPanelDriver::new(handle.clone(), Duration::from_millis(1));
+        assert_eq!(driver.poll().unwrap().buttons & (buttons::JOG_ZN | buttons::JOG_BN), 0);
+        std::thread::sleep(Duration::from_millis(10));
+        driver.poll().unwrap();
+        assert!(!handle.snapshot().mixed_jog_interlock);
+    }
+
+    #[test]
+    fn opposite_directions_publish_an_interlock_until_every_jog_is_released() {
+        let handle = SimPanelHandle::new();
+        let mut driver = SimPanelDriver::new(handle.clone(), Duration::from_millis(1));
+        handle.set(|s| {
+            s.mode = PanelMode::Jog;
+            s.set_button(buttons::JOG_AP | buttons::JOG_AN, true);
+        });
+        assert!(handle.snapshot().mixed_jog_interlock);
+        assert_eq!(driver.poll().unwrap().buttons & (buttons::JOG_AP | buttons::JOG_AN), 0);
+        handle.set(|s| s.set_button(buttons::JOG_AN, false));
+        assert!(handle.snapshot().mixed_jog_interlock);
+        assert_eq!(driver.poll().unwrap().buttons & buttons::JOG_AP, 0);
+        handle.set(|s| s.set_button(buttons::JOG_AP, false));
+        assert!(!handle.snapshot().mixed_jog_interlock);
+    }
+
+    #[test]
+    fn angular_settings_are_bounded_and_rejected_while_any_jog_is_held() {
+        let ini = linc_core::ini::MachineIni::parse(
+            std::path::Path::new("configs/sim-5axis.ini"),
+            include_str!("../../../configs/sim-5axis.ini"),
+        ).unwrap();
+        let handle = SimPanelHandle::new();
+        handle.set(|state| state.configure_angular_jog(&ini));
+        let control = SimControlState::new(handle.clone());
+        let initial = control.state();
+        assert_eq!(initial["angular_jog"]["speed"], 36.0);
+        assert_eq!(initial["angular_jog"]["wired"], false);
+        control.apply(&SimPanelPatch { angular_jog_speed: Some(20.0), angular_jog_increment_index: Some(2), ..Default::default() }).unwrap();
+        assert_eq!(handle.snapshot().angular_jog.as_ref().unwrap().speed, 20.0);
+        assert_eq!(handle.snapshot().angular_jog.as_ref().unwrap().increment_index, 2);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 361.0] {
+            assert!(control.apply(&SimPanelPatch { angular_jog_speed: Some(bad), ..Default::default() }).is_err());
+        }
+        assert!(control.apply(&SimPanelPatch { angular_jog_increment_index: Some(99), ..Default::default() }).is_err());
+        assert!(control.apply(&SimPanelPatch {
+            angular_jog_speed: Some(10.0),
+            press: Some(vec!["jog_ap".into()]),
+            ..Default::default()
+        }).is_err());
+        assert_eq!(handle.snapshot().buttons & buttons::JOG_AP, 0);
+        handle.set(|state| state.set_button(buttons::JOG_XP, true));
+        assert!(control.apply(&SimPanelPatch { angular_jog_speed: Some(10.0), ..Default::default() }).is_err());
+        assert_eq!(handle.snapshot().angular_jog.as_ref().unwrap().speed, 20.0);
+        handle.set(|state| state.set_button(buttons::JOG_XP, false));
+        control.reset().unwrap();
+        let settings = handle.snapshot().angular_jog.unwrap();
+        assert_eq!((settings.speed, settings.increment_index), (36.0, 0));
+        let mut broken = ini.clone();
+        broken.joint_jog[3].max_velocity = None;
+        handle.set(|state| state.configure_angular_jog(&broken));
+        assert!(handle.snapshot().angular_jog.is_none());
     }
 
     #[test]

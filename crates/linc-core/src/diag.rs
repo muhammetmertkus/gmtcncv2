@@ -296,6 +296,9 @@ pub struct SimPanelPatch {
     pub feed_override: Option<f64>,
     pub rapid_override: Option<f64>,
     pub spindle_override: Option<f64>,
+    /// Simulation-only angular jog settings; absent fields leave values alone.
+    pub angular_jog_speed: Option<f64>,
+    pub angular_jog_increment_index: Option<usize>,
     pub program_protect: Option<bool>,
     pub estop: Option<bool>,
     /// Simulation power state: `cnc_panel.power_on`, not the POWER ON key edge.

@@ -6,6 +6,7 @@
 
 pub mod hal;
 pub mod icons;
+pub mod jog_arbiter;
 pub mod serial;
 pub mod sim;
 

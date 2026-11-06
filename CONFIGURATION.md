@@ -664,7 +664,31 @@ The bindings do not change: the panel's navigation keys already send `F5` to
 | `[pendant]` | `enabled`, `kind`, `jog_only`, `ignored_functions` |
 | `[preferences]` | `file` |
 | `[diagnostics]` | `event_log_capacity`, `panel_link_stats`, `turret_tab` |
-| `[simulation]` | `enabled`, optional `panel`, `rio`, `estop`, `panel_window`, `panel_title`, `panel_scale` |
+| `[simulation]` | `enabled`, optional `panel`, `rio`, `estop`, `panel_window`, `panel_title`, `panel_scale`, `panel_keys` |
+
+The embedded simulator can customize the presentation of existing matrix keys:
+
+```toml
+[[simulation.panel_keys]]
+name = "worklamp"
+label = "WORK LIGHT"
+icon = "bulb"
+
+[[simulation.panel_keys]]
+name = "air_blow"
+hidden = true
+```
+
+`name` is an existing simulated panel button pin name; it cannot create a new
+HAL pin or action. `label` is optional and limited to 1–24 characters. `icon`
+is optional: `panel` uses the panel pictogram; `bulb`, `droplet`, `wind`, and
+`stop` use bundled Tabler icons. `hidden` defaults to false. Unknown names,
+icons and duplicate entries fail profile validation. The E-stop, power, mode,
+cycle and protect controls are not customizable with this setting. Axis
+buttons remain subject to the INI axis filter and HAL connection status.
+In the embedded panel, the `ICONS` tab also lets the operator choose a bundled
+icon for a visible key. That operator preference takes precedence over the
+profile's icon; `default` returns to the profile choice.
 
 Enums:
 

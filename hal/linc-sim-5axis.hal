@@ -1,0 +1,61 @@
+# XYZAB simulator only: A/B LEDs and rotary jog gates.
+
+net axis-a-homed halui.joint.3.is-homed => cnc_panel.led_a
+net axis-b-homed halui.joint.4.is-homed => cnc_panel.led_b
+
+# Simulated rotary servos follow the commanded position, as the XYZ rig does.
+# These loopbacks are specific to the simulator; they are not drive feedback.
+net sim5-joint3-position joint.3.motor-pos-cmd => joint.3.motor-pos-fb
+net sim5-joint4-position joint.4.motor-pos-cmd => joint.4.motor-pos-fb
+
+# A ready gate stays false until the post-GUI linear speed and linc pins exist.
+loadrt mux2 names=sim5.speed
+loadrt logic names=sim5.ready,sim5.ap_axis,sim5.ap_joint,sim5.ap_step_axis,sim5.ap_step_joint,sim5.an_axis,sim5.an_joint,sim5.an_step_axis,sim5.an_step_joint,sim5.bp_axis,sim5.bp_joint,sim5.bp_step_axis,sim5.bp_step_joint,sim5.bn_axis,sim5.bn_joint,sim5.bn_step_axis,sim5.bn_step_joint personality=0x102,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104,0x104
+addf sim5.speed servo-thread
+addf sim5.ready servo-thread
+addf sim5.ap_axis servo-thread
+addf sim5.ap_joint servo-thread
+addf sim5.ap_step_axis servo-thread
+addf sim5.ap_step_joint servo-thread
+addf sim5.an_axis servo-thread
+addf sim5.an_joint servo-thread
+addf sim5.an_step_axis servo-thread
+addf sim5.an_step_joint servo-thread
+addf sim5.bp_axis servo-thread
+addf sim5.bp_joint servo-thread
+addf sim5.bp_step_axis servo-thread
+addf sim5.bp_step_joint servo-thread
+addf sim5.bn_axis servo-thread
+addf sim5.bn_joint servo-thread
+addf sim5.bn_step_axis servo-thread
+addf sim5.bn_step_joint servo-thread
+
+net sim5-selector cnc_panel.sim_angular_select => sim5.speed.sel
+net sim5-angular-speed cnc_panel.sim_angular_speed => sim5.speed.in1
+net sim5-speed sim5.speed.out => halui.axis.jog-speed halui.joint.jog-speed
+net sim5-increment cnc_panel.sim_angular_increment => halui.axis.a.increment halui.axis.b.increment halui.joint.3.increment halui.joint.4.increment
+net sim5-ready sim5.ready.and => cnc_panel.sim_angular_ready sim5.ap_axis.in-03 sim5.ap_joint.in-03 sim5.ap_step_axis.in-03 sim5.ap_step_joint.in-03 sim5.an_axis.in-03 sim5.an_joint.in-03 sim5.an_step_axis.in-03 sim5.an_step_joint.in-03 sim5.bp_axis.in-03 sim5.bp_joint.in-03 sim5.bp_step_axis.in-03 sim5.bp_step_joint.in-03 sim5.bn_axis.in-03 sim5.bn_joint.in-03 sim5.bn_step_axis.in-03 sim5.bn_step_joint.in-03
+net is-teleop => sim5.ap_axis.in-02 sim5.ap_step_axis.in-02 sim5.an_axis.in-02 sim5.an_step_axis.in-02 sim5.bp_axis.in-02 sim5.bp_step_axis.in-02 sim5.bn_axis.in-02 sim5.bn_step_axis.in-02
+net not-teleop => sim5.ap_joint.in-02 sim5.ap_step_joint.in-02 sim5.an_joint.in-02 sim5.an_step_joint.in-02 sim5.bp_joint.in-02 sim5.bp_step_joint.in-02 sim5.bn_joint.in-02 sim5.bn_step_joint.in-02
+net mode-jog => sim5.ap_axis.in-01 sim5.ap_joint.in-01 sim5.an_axis.in-01 sim5.an_joint.in-01 sim5.bp_axis.in-01 sim5.bp_joint.in-01 sim5.bn_axis.in-01 sim5.bn_joint.in-01
+net mode-inc => sim5.ap_step_axis.in-01 sim5.ap_step_joint.in-01 sim5.an_step_axis.in-01 sim5.an_step_joint.in-01 sim5.bp_step_axis.in-01 sim5.bp_step_joint.in-01 sim5.bn_step_axis.in-01 sim5.bn_step_joint.in-01
+net jog-ap cnc_panel.jog_ap => sim5.ap_axis.in-00 sim5.ap_joint.in-00 sim5.ap_step_axis.in-00 sim5.ap_step_joint.in-00
+net sim5-ap-axis sim5.ap_axis.and => halui.axis.a.plus
+net sim5-ap-joint sim5.ap_joint.and => halui.joint.3.plus
+net sim5-ap-step-axis sim5.ap_step_axis.and => halui.axis.a.increment-plus
+net sim5-ap-step-joint sim5.ap_step_joint.and => halui.joint.3.increment-plus
+net jog-an cnc_panel.jog_an => sim5.an_axis.in-00 sim5.an_joint.in-00 sim5.an_step_axis.in-00 sim5.an_step_joint.in-00
+net sim5-an-axis sim5.an_axis.and => halui.axis.a.minus
+net sim5-an-joint sim5.an_joint.and => halui.joint.3.minus
+net sim5-an-step-axis sim5.an_step_axis.and => halui.axis.a.increment-minus
+net sim5-an-step-joint sim5.an_step_joint.and => halui.joint.3.increment-minus
+net jog-bp cnc_panel.jog_bp => sim5.bp_axis.in-00 sim5.bp_joint.in-00 sim5.bp_step_axis.in-00 sim5.bp_step_joint.in-00
+net sim5-bp-axis sim5.bp_axis.and => halui.axis.b.plus
+net sim5-bp-joint sim5.bp_joint.and => halui.joint.4.plus
+net sim5-bp-step-axis sim5.bp_step_axis.and => halui.axis.b.increment-plus
+net sim5-bp-step-joint sim5.bp_step_joint.and => halui.joint.4.increment-plus
+net jog-bn cnc_panel.jog_bn => sim5.bn_axis.in-00 sim5.bn_joint.in-00 sim5.bn_step_axis.in-00 sim5.bn_step_joint.in-00
+net sim5-bn-axis sim5.bn_axis.and => halui.axis.b.minus
+net sim5-bn-joint sim5.bn_joint.and => halui.joint.4.minus
+net sim5-bn-step-axis sim5.bn_step_axis.and => halui.axis.b.increment-minus
+net sim5-bn-step-joint sim5.bn_step_joint.and => halui.joint.4.increment-minus

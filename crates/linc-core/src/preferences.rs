@@ -54,6 +54,17 @@ pub struct Preferences {
     /// Index into `[DISPLAY] INCREMENTS`; 0 is continuous jog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jog_increment: Option<usize>,
+    /// Last selected simulator panel group; presentation only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_panel_group: Option<String>,
+    /// Explicit visibility choices by page; absent pages use their defaults.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sim_panel_pages: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim_panel_height: Option<f32>,
+    /// Operator-selected bundled simulator key icons, keyed by panel pin name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sim_panel_icons: BTreeMap<String, String>,
     /// Jog speed as a percentage of `[DISPLAY] DEFAULT_LINEAR_VELOCITY`.
     ///
     /// No longer read: the jog follows the feed override. Kept so an existing
@@ -188,6 +199,10 @@ mod tests {
             last_page: Some("program".into()),
             program_view: Some("code".into()),
             toolpath_zoom: Some(1.5),
+            sim_panel_group: Some("JOG".into()),
+            sim_panel_height: Some(250.0),
+            sim_panel_pages: [("PROGRAM".into(), true), ("MANUAL".into(), false)].into(),
+            sim_panel_icons: [("worklamp".into(), "bulb".into())].into(),
             ..Default::default()
         };
         preferences.remember_file("/nc/demo.nc", 8);

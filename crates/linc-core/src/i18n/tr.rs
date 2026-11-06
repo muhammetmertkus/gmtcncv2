@@ -133,4 +133,6 @@ pub static TR_MESSAGES: &[(&str, &str)] = &[
     ("shell.badges.protect_tooltip", "Program Kilidi Açık — Düzenleme, ofset yazımı ve veri girişleri engellendi"),
     ("shell.badges.ext_change", "DIŞ DEĞİŞİM"),
     ("shell.badges.ext_change_tooltip", "Program Harici Değişti — Kaydedilmemiş tampon korundu"),
+    ("shell.top_bar.alarms", "Alarmlar (Teşhis sekmesi için tıklayın)"),
+    ("shell.top_bar.messages", "Bildirimler & Mesajlar (Teşhis sekmesi için tıklayın)"),
 ];

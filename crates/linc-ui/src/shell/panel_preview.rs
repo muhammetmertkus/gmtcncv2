@@ -4,44 +4,87 @@
 use super::*;
 
 impl LincApp {
+    pub(super) fn release_embedded_panel_holds(&self, ctx: &egui::Context) {
+        ctx.data_mut(|data| {
+            data.remove::<EmbeddedHolds>(egui::Id::unique("embedded-panel-held-inputs"))
+        });
+        if let Some(control) = &self.panel_preview_control {
+            control.set_held(Vec::new(), control.state().connection_generation);
+        }
+    }
+
     pub(super) fn draw_panel_preview(&self, ui: &mut egui::Ui) {
         let panel = &self.snapshot.panel;
-        ui.heading(RichText::new("SIM PANEL").color(theme::FG));
-        ui.label(RichText::new("SIMULATION PREVIEW").color(theme::WARNING));
-        if let Some(control) = &self.panel_preview_control {
-            let state = control.state();
-            let ready = state.ready
-                && state
-                    .checked_at
-                    .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(750));
-            let label = if state.estop {
-                "RELEASE SIM E-STOP"
-            } else {
-                "ACTIVATE SIM E-STOP"
-            };
-            let button = egui::Button::new(
-                RichText::new(label)
-                    .color(if ready { theme::SURFACE } else { theme::FG })
-                    .strong(),
-            )
-            .fill(if ready {
-                theme::ERROR
-            } else {
-                theme::PANEL_RAISED
-            })
-            .min_size(Vec2::new(ui.available_width(), theme::MIN_TARGET));
-            if ui.add_enabled(ready, button).clicked() {
-                control.send(super::panel_preview_control::Command::Estop(!state.estop));
+        ui.horizontal_wrapped(|ui| {
+            ui.heading(RichText::new("SIM PANEL").color(theme::FG));
+            ui.label(RichText::new("SIMULATION PREVIEW").color(theme::WARNING));
+            if let Some(control) = &self.panel_preview_control {
+                let state = control.state();
+                let ready = state.ready
+                    && state
+                        .checked_at
+                        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(750));
+                let label = if state.estop {
+                    "RELEASE SIM E-STOP"
+                } else {
+                    "ACTIVATE SIM E-STOP"
+                };
+                let button = egui::Button::new(
+                    RichText::new(label)
+                        .color(if ready { theme::SURFACE } else { theme::FG })
+                        .strong(),
+                )
+                .fill(if ready {
+                    theme::ERROR
+                } else {
+                    theme::PANEL_RAISED
+                })
+                .min_size(Vec2::new(theme::MIN_TARGET, theme::MIN_TARGET));
+                if ui.add_enabled(ready, button).clicked() {
+                    control.send(super::panel_preview_control::Command::Estop(!state.estop));
+                }
+                if !ready {
+                    ui.label(RichText::new("SIM CONTROL OFFLINE").color(theme::WARNING));
+                }
             }
-            if !ready {
-                ui.label(RichText::new("SIM CONTROL OFFLINE").color(theme::WARNING));
+        });
+        let tab_id = egui::Id::unique("embedded-panel-group");
+        let mut group = ui.ctx().data_mut(|data| {
+            data.get_temp::<&'static str>(tab_id).unwrap_or("ALL")
+        });
+        let previous_group = group;
+        ui.horizontal_wrapped(|ui| {
+            for (value, label) in [
+                ("ALL", "ALL"),
+                ("CONTROL", "CONTROL"),
+                ("JOG", "JOG"),
+                ("FUNCTIONS", "FUNCTIONS"),
+                ("SPINDLE / MACHINE", "SPINDLE"),
+                ("ICONS", "ICONS"),
+            ] {
+                if ui
+                    .add(egui::Button::new(label).selected(group == value).min_size(Vec2::splat(theme::MIN_TARGET)))
+                    .clicked()
+                {
+                    group = value;
+                }
             }
+        });
+        if group != previous_group {
+            // A held key must never survive switching away from its controls.
+            self.release_embedded_panel_holds(ui.ctx());
+            ui.ctx().data_mut(|data| data.insert_temp(tab_id, group));
         }
         ui.separator();
-        egui::ScrollArea::vertical()
+        let scroll = egui::ScrollArea::vertical()
             .id_salt("embedded-panel-preview-scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+            .auto_shrink([false, false]);
+        let scroll = if group != previous_group {
+            scroll.vertical_scroll_offset(0.0)
+        } else {
+            scroll
+        };
+        scroll.show(ui, |ui| {
                 ui.spacing_mut().interact_size.y = 0.0;
                 ui.set_min_width(ui.available_width());
                 if let Some(control) = &self.panel_preview_control {
@@ -50,11 +93,51 @@ impl LincApp {
                         && state
                             .checked_at
                             .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(750));
+                    if state.mixed_jog_interlock {
+                        ui.label(RichText::new("JOG INTERLOCK: RELEASE ALL AXIS KEYS")
+                            .strong().color(theme::WARNING));
+                    }
+                    let icon_id = egui::Id::unique("embedded-panel-icons");
+                    let mut icon_choices = ui.ctx().data_mut(|data| {
+                        data.get_temp::<std::collections::BTreeMap<String, String>>(icon_id).unwrap_or_default()
+                    });
+                    if group == "ICONS" {
+                        ui.label(RichText::new("PANEL ICONS").strong().color(theme::FG));
+                        let lathe = self.profile.variant == MachineVariant::Lathe;
+                        let sub = self.profile.config.lathe.as_ref().and_then(|config| config.sub_spindle).unwrap_or(false);
+                        for (_, keys) in panel_key_groups(lathe, sub) {
+                            for &(label, name) in keys {
+                                let config = self.profile.config.simulation.panel_keys.iter().find(|key| key.name == name);
+                                if !key_in_machine(name, &self.profile.machine_ini.coordinates)
+                                    || config.is_some_and(|key| key.hidden) { continue; }
+                                let display_label = config.and_then(|key| key.label.as_deref()).unwrap_or(label);
+                                let mut selected = icon_choices.get(name).map(String::as_str).unwrap_or("default");
+                                let before = selected;
+                                ui.horizontal(|ui| {
+                                    ui.label(display_label);
+                                    egui::ComboBox::from_id_salt(("sim-panel-icon-picker", name))
+                                        .selected_text(selected)
+                                        .show_ui(ui, |ui| {
+                                            for choice in ["default", "panel", "bulb", "droplet", "wind", "stop"] {
+                                                ui.selectable_value(&mut selected, choice, choice);
+                                            }
+                                        });
+                                });
+                                if selected != before {
+                                    if selected == "default" { icon_choices.remove(name); }
+                                    else { icon_choices.insert(name.to_owned(), selected.to_owned()); }
+                                }
+                            }
+                        }
+                        ui.ctx().data_mut(|data| data.insert_temp(icon_id, icon_choices.clone()));
+                    }
+                    if group == "ALL" || group == "CONTROL" {
                     ui.horizontal_wrapped(|ui| {
                         if ui
                             .add_enabled(
                                 ready,
                                 egui::Button::new("POWER ON")
+                                    .selected(panel.power_on == Some(true))
                                     .min_size(Vec2::splat(theme::MIN_TARGET)),
                             )
                             .clicked()
@@ -65,6 +148,7 @@ impl LincApp {
                             .add_enabled(
                                 ready,
                                 egui::Button::new("POWER OFF")
+                                    .selected(panel.power_on == Some(false))
                                     .min_size(Vec2::splat(theme::MIN_TARGET)),
                             )
                             .clicked()
@@ -75,6 +159,7 @@ impl LincApp {
                             .add_enabled(
                                 ready,
                                 egui::Button::new("PROTECT")
+                                    .selected(state.protect)
                                     .min_size(Vec2::splat(theme::MIN_TARGET)),
                             )
                             .clicked()
@@ -175,6 +260,11 @@ impl LincApp {
                             &mill
                         };
                         for (caption, led) in common.iter().chain(alarms.iter()) {
+                            if matches!(*caption, "X" | "Y" | "Z" | "A" | "B" | "C")
+                                && !self.profile.machine_ini.coordinates.iter().any(|axis| axis == caption)
+                            {
+                                continue;
+                            }
                             let estop_lamp = if self.profile.variant == MachineVariant::Lathe {
                                 "led_emg"
                             } else {
@@ -199,6 +289,7 @@ impl LincApp {
                             );
                         }
                     });
+                    }
                     let mut key_rects = Vec::new();
                     let lathe = self.profile.variant == MachineVariant::Lathe;
                     let sub_spindle = self
@@ -208,20 +299,102 @@ impl LincApp {
                         .as_ref()
                         .and_then(|config| config.sub_spindle)
                         .unwrap_or(false);
+                    if group == "JOG" {
+                        for axis in self.profile.machine_ini.axes.iter().filter(|axis| axis.axis_type == "ANGULAR") {
+                            let text = match self.profile.machine_ini.angular_jog_plan(&axis.name) {
+                                Ok(plan) => format!("{} / J{} · INI default {:.2}, max {:.2} {}/s · {} angular steps",
+                                    plan.axis, plan.joint, plan.default_speed, plan.max_speed,
+                                    self.profile.machine_ini.angular_units, plan.increments.len()),
+                                Err(reason) => format!("{} ANGULAR JOG SETTINGS: {reason}", axis.name),
+                            };
+                            ui.label(RichText::new(text).color(theme::WARNING));
+                        }
+                        if let Some(angular) = &state.angular_jog {
+                            let locally_held = ui.ctx().data_mut(|data| {
+                                data.get_temp::<EmbeddedHolds>(egui::Id::unique("embedded-panel-held-inputs"))
+                                    .is_some_and(|holds| holds.keys().iter().any(|name| name.starts_with("jog_")))
+                            });
+                            let adjustable = ready && !locally_held && !state.mixed_jog_interlock
+                                && !state.pressed_buttons.iter().any(|name| name.starts_with("jog_"));
+                            ui.label(RichText::new(if angular.wired {
+                                "ANGULAR JOG"
+                            } else {
+                                "ANGULAR SETTINGS ONLY — JOG NOT CONNECTED"
+                            }).color(theme::WARNING));
+                            let mut step = angular.increment_index;
+                            ui.add_enabled_ui(adjustable, |ui| {
+                                egui::ComboBox::from_id_salt("sim-angular-increment")
+                                    .selected_text(&angular.increments[step].0)
+                                    .show_ui(ui, |ui| {
+                                        for (index, (label, _)) in angular.increments.iter().enumerate() {
+                                            ui.selectable_value(&mut step, index, label);
+                                        }
+                                    });
+                            });
+                            if adjustable && step != angular.increment_index {
+                                control.send(super::panel_preview_control::Command::AngularIncrement(step));
+                            }
+                            let id = egui::Id::unique("embedded-angular-speed-pending");
+                            let mut pending = ui.ctx().data_mut(|data| data.get_temp::<PendingOverride>(id));
+                            let mut speed = pending.as_ref().and_then(|value| value.display(angular.speed, adjustable)).unwrap_or(angular.speed);
+                            let response = ui.add_enabled(adjustable,
+                                egui::Slider::new(&mut speed, (angular.max_speed / 1000.0)..=angular.max_speed)
+                                    .text(format!("ANGULAR {}/s", angular.units)));
+                            if response.changed() {
+                                control.send(super::panel_preview_control::Command::AngularSpeed(speed));
+                                pending = Some(PendingOverride { value: speed, sent_at: std::time::Instant::now() });
+                            } else if pending.as_ref().is_some_and(|value| value.display(angular.speed, adjustable).is_none()) {
+                                pending = None;
+                            }
+                            ui.ctx().data_mut(|data| {
+                                if let Some(value) = pending { data.insert_temp(id, value); }
+                                else { data.remove::<PendingOverride>(id); }
+                            });
+                        }
+                    }
                     for (group, keys) in panel_key_groups(lathe, sub_spindle) {
+                        let selected_group = ui.ctx().data_mut(|data| {
+                            data.get_temp::<&'static str>(tab_id).unwrap_or("ALL")
+                        });
+                        if selected_group != "ALL"
+                            && selected_group != group
+                            && !(selected_group == "SPINDLE / MACHINE" && group == "SECOND SPINDLE")
+                        {
+                            continue;
+                        }
                         ui.label(RichText::new(group).strong().color(theme::FG));
                         let gap = 4.0;
-                        let width =
-                            ((ui.available_width() - gap * 2.0) / 3.0).max(theme::MIN_TARGET);
-                        for row in keys.chunks(3) {
+                        let visible: Vec<_> = keys
+                            .iter()
+                            .filter(|(_, name)| {
+                                key_in_machine(name, &self.profile.machine_ini.coordinates)
+                                    && !self.profile.config.simulation.panel_keys.iter()
+                                        .any(|key| key.name == *name && key.hidden)
+                            })
+                            .collect();
+                        let columns = ((ui.available_width() + gap) / (88.0 + gap))
+                            .floor()
+                            .max(1.0) as usize;
+                        let width = ((ui.available_width()
+                            - gap * (columns.saturating_sub(1)) as f32)
+                            / columns as f32)
+                            .max(theme::MIN_TARGET);
+                        for row in visible.chunks(columns) {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = gap;
-                                for (label, name) in row {
-                                    let wired = !state
+                                for &&(label, name) in row {
+                                    let customization = self.profile.config.simulation.panel_keys.iter()
+                                        .find(|key| key.name == name);
+                                    let display_label = customization.and_then(|key| key.label.as_deref()).unwrap_or(label);
+                                    let angular_not_ready = jog_axis(name).is_some_and(|axis| {
+                                        self.profile.machine_ini.axis(axis).is_some_and(|axis| axis.axis_type == "ANGULAR")
+                                            && state.angular_jog.as_ref().is_none_or(|settings| !settings.wired)
+                                    });
+                                    let wired = !angular_not_ready && !state
                                         .disconnected_buttons
                                         .iter()
                                         .any(|unwired| unwired == name);
-                                    let led_name = if *name == "lube" {
+                                    let led_name = if name == "lube" {
                                         "led_lub".to_string()
                                     } else {
                                         format!("led_{name}")
@@ -230,7 +403,7 @@ impl LincApp {
                                         state.active_leds.iter().any(|led| led == &led_name);
                                     let mask = linc_core::panel_buttons::BUTTON_PINS
                                         .iter()
-                                        .find(|(entry, _)| entry == name)
+                                        .find(|(entry, _)| *entry == name)
                                         .map(|(_, mask)| *mask);
                                     let icon = mask.and_then(|mask| {
                                         linc_view::panel_icons::for_key(
@@ -238,7 +411,11 @@ impl LincApp {
                                             icon_arrow(label, lathe),
                                         )
                                     });
-                                    let button = egui::Button::new("").fill(theme::SURFACE);
+                                    // LED feedback is supplied by the panel service; a press
+                                    // alone does not mean the machine accepted the action.
+                                    let button = egui::Button::new("")
+                                        .fill(if active { theme::PANEL } else { theme::PANEL_RAISED })
+                                        .selected(active);
                                     let response = ui
                                         .add_enabled_ui(ready && wired, |ui| {
                                             ui.add_sized([width, 64.0], button)
@@ -250,14 +427,19 @@ impl LincApp {
                                         theme::MUTED
                                     };
                                     let painter = ui.painter();
-                                    if let Some(icon) = icon {
-                                        let icon_rect = egui::Rect::from_center_size(
+                                    let icon_rect = egui::Rect::from_center_size(
                                             egui::pos2(
                                                 response.rect.center().x,
                                                 response.rect.top() + 23.0,
                                             ),
                                             Vec2::new((width - 8.0).max(24.0), 27.0),
                                         );
+                                    let selected_icon = icon_choices.get(name).map(String::as_str)
+                                        .or_else(|| customization.and_then(|key| key.icon.as_deref()));
+                                    if let Some(texture) = panel_svg(ui.ctx(), name, selected_icon) {
+                                        let square = egui::Rect::from_center_size(icon_rect.center(), Vec2::splat(27.0));
+                                        painter.image(texture.id(), square, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), color);
+                                    } else if let Some(icon) = icon {
                                         linc_view::panel_icons::paint(
                                             painter, icon, icon_rect, color,
                                         );
@@ -268,7 +450,7 @@ impl LincApp {
                                             response.rect.bottom() - 9.0,
                                         ),
                                         Align2::CENTER_CENTER,
-                                        *label,
+                                        display_label,
                                         FontId::proportional(theme::font_size(8.0)),
                                         color,
                                     );
@@ -284,14 +466,14 @@ impl LincApp {
                                     if ready && wired {
                                         let rect = response.rect.intersect(ui.clip_rect());
                                         if rect.is_positive() {
-                                            key_rects.push((*name, rect));
+                                            key_rects.push((name, rect));
                                         }
                                     }
                                 }
                             });
                         }
                     }
-                    if state.probe_enabled {
+                    if state.probe_enabled && (group == "ALL" || group == "JOG") {
                         let response = ui.add_enabled(
                             ready,
                             egui::Button::new("PROBE CONTACT")
@@ -323,6 +505,7 @@ impl LincApp {
                             .request_repaint_after(std::time::Duration::from_millis(50));
                     }
                     // Values are percentages in the panel UI and ratios on the wire.
+                    if group == "ALL" || group == "CONTROL" {
                     for (label, current, range, make_command) in [
                         (
                             "FEED %",
@@ -376,6 +559,7 @@ impl LincApp {
                                 data.remove::<PendingOverride>(id);
                             }
                         });
+                    }
                     }
                 }
                 ui.separator();
@@ -487,6 +671,37 @@ fn panel_value(ui: &mut egui::Ui, label: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jog_axis_filter_handles_both_directions_and_non_axis_keys() {
+        for (key, axis) in [("jog_xp", "X"), ("jog_yn", "Y"), ("jog_zp", "Z"),
+            ("jog_an", "A"), ("jog_bp", "B"), ("jog_cn", "C")] {
+            assert_eq!(jog_axis(key), Some(axis));
+        }
+        assert_eq!(jog_axis("rapid"), None);
+        assert_eq!(jog_axis("coolant"), None);
+        let xyz = ["X", "Y", "Z"].map(str::to_owned);
+        assert!(key_in_machine("jog_xp", &xyz));
+        assert!(key_in_machine("rapid", &xyz));
+        assert!(!key_in_machine("jog_ap", &xyz));
+        assert!(!key_in_machine("jog_bn", &xyz));
+        let xz = ["X", "Z"].map(str::to_owned);
+        assert!(key_in_machine("jog_zn", &xz));
+        assert!(!key_in_machine("jog_yp", &xz));
+    }
+
+    #[test]
+    fn bundled_panel_icons_render_and_reuse_their_texture() {
+        let ctx = egui::Context::default();
+        for key in ["worklamp", "coolant", "air_blow", "spd_sp"] {
+            let first = panel_svg(&ctx, key, None).expect("bundled icon must render");
+            let second = panel_svg(&ctx, key, None).expect("cached icon must exist");
+            assert_eq!(first.id(), second.id());
+        }
+        assert!(panel_svg(&ctx, "unknown", None).is_none());
+        assert!(panel_svg(&ctx, "unknown", Some("bulb")).is_some());
+        assert!(panel_svg(&ctx, "worklamp", Some("panel")).is_none());
+    }
 
     fn luminance(color: Color32) -> f64 {
         let channel = |v: u8| {
@@ -717,6 +932,54 @@ impl EmbeddedHolds {
 }
 
 type EmbeddedKey = (&'static str, &'static str);
+/// Render a small, bundled MIT-licensed icon once per egui context. The
+/// remaining machine-specific keys retain the existing panel pictograms.
+fn panel_svg(ctx: &egui::Context, key: &str, override_icon: Option<&str>) -> Option<egui::TextureHandle> {
+    let icon = override_icon.unwrap_or(match key {
+        "worklamp" => "bulb",
+        "coolant" | "flush" => "droplet",
+        "air_blow" => "wind",
+        "spd_sp" | "chip_sp" => "stop",
+        _ => "panel",
+    });
+    let (name, bytes): (&'static str, &'static [u8]) = match icon {
+        "bulb" => ("bulb", include_bytes!("../../../../assets/panel-icons/tabler/bulb.svg")),
+        "droplet" => ("droplet", include_bytes!("../../../../assets/panel-icons/tabler/droplet.svg")),
+        "wind" => ("wind", include_bytes!("../../../../assets/panel-icons/tabler/wind.svg")),
+        "stop" => ("stop", include_bytes!("../../../../assets/panel-icons/tabler/player-stop.svg")),
+        _ => return None,
+    };
+    let id = egui::Id::unique(("embedded-panel-svg", name));
+    if let Some(texture) = ctx.data_mut(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+    let svg = std::str::from_utf8(bytes).ok()?.replace("currentColor", "#ffffff");
+    let tree = resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    let scale = 96.0 / size.width().max(size.height());
+    let width = (size.width() * scale).ceil() as u32;
+    let height = (size.height() * scale).ceil() as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    let image = egui::ColorImage::from_rgba_premultiplied([width as usize, height as usize], pixmap.data());
+    let texture = ctx.load_texture(format!("sim-panel-{name}"), image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+    Some(texture)
+}
+fn key_in_machine(name: &str, coordinates: &[String]) -> bool {
+    jog_axis(name).is_none_or(|axis| coordinates.iter().any(|configured| configured == axis))
+}
+fn jog_axis(name: &str) -> Option<&'static str> {
+    match name {
+        "jog_xp" | "jog_xn" => Some("X"),
+        "jog_yp" | "jog_yn" => Some("Y"),
+        "jog_zp" | "jog_zn" => Some("Z"),
+        "jog_ap" | "jog_an" => Some("A"),
+        "jog_bp" | "jog_bn" => Some("B"),
+        "jog_cp" | "jog_cn" => Some("C"),
+        _ => None,
+    }
+}
 const MILL_JOG: &[EmbeddedKey] = &[
     ("B+", "jog_bp"),
     ("SAFE DOOR", "safe_door"),

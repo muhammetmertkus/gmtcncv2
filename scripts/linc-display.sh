@@ -65,6 +65,9 @@ fi
 # than by pins: the lathe now loads a panel service, so cnc_panel exists in
 # both machines and a pin test cannot tell them apart.
 POSTGUI="$LINC_DIR/hal/linc-sim-postgui.hal"
+if halcmd show pin sim5.speed.in0 2>/dev/null | grep -q 'sim5\.speed\.in0'; then
+    POSTGUI="$LINC_DIR/hal/linc-sim-5axis-postgui.hal"
+fi
 if [ -n "${LINC_CONFIG:-}" ] && [ -f "$LINC_CONFIG" ] && \
    grep -Eq '^[[:space:]]*gui[[:space:]]*=[[:space:]]*"lathe"' "$LINC_CONFIG"; then
     POSTGUI="$LINC_DIR/hal/linc-lathe-postgui.hal"

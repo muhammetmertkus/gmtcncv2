@@ -1,8 +1,59 @@
 # Dinamik simülasyon paneli: geliştirme yol haritası
 
 Tarih: 6 Kasım 2026  
-Durum: öneri; aşağıdaki aşamalar henüz uygulanmadı.  
+Durum: kısmen uygulanıyor; ayrıntılar aşağıdaki uygulama durumunda.
 Kapsam: LiNC'nin simülasyon profillerindeki gömülü paneli. Gerçek makinede yazılımsal kontrol bu planla etkinleştirilmez.
+
+## Uygulama durumu
+
+İlk geliştirme diliminde panel alt kenara taşındı, yüksekliği sınırlandırıldı ve
+panel gizlenince tutulan girişlerin bırakılması eklendi. Sabit eksen lambaları
+ve jog tuşları aktif INI'deki koordinatlara göre filtreleniyor. Kontrol, jog,
+işlev ve spindle sekmeleri, sayfa bazlı görünürlük, seçili sekme ve panel
+yüksekliği tercihleri eklendi. Sekme değişimi tutulan girişleri bırakır. Mevcut
+LED ve güç/koruma geri bildirimleriyle seçili buton görünümleri başlatıldı.
+Lisanslı Tabler ikonlarının küçük bir alt kümesi, mevcut simülasyon panel
+tuşları için TOML üzerinden etiket/ikon/gizleme seçimi ve panelde ICONS
+sekmesinden ikon seçimi eklendi. Beş eksen simülasyonunda A/B homing LED'leri
+joint durumuna bağlandı. Bu, aşağıdaki aşamaların tamamlandığı anlamına gelmez:
+tüm AXIS fonksiyonları, kullanıcı SVG yükleme, kullanıcı tanımlı sanal HAL,
+harici panel uyumluluğu henüz uygulanmadı.
+Ayrı `[DISPLAY] ANGULAR_INCREMENTS` listesi ve açısal hız değerleri artık INI
+modelinde okunur; geçersiz adımlar ayrıca raporlanır. Bu veriler jog
+arayüzü ve simülasyon servisinde ayarlanabilir. Yerel AXIS, ayrı
+`ANGULAR_INCREMENTS` anahtarını değil `INCREMENTS` içindeki birimleri kullanır;
+bu anahtar beş eksen profilindeki diğer GUI uyumluluğu için ayrıca okunur.
+Model artık açık ve tekil trivkins axis–joint eşlemesini, axis/joint türlerini,
+hız sınırlarını ve açısal adım birimlerini denetleyen hareket başlatmayan bir
+plan da hazırlar. Belirsiz kinematik ve eksik/geçersiz sınırlar reddedilir.
+Plana sahip olmak tek başına HAL zincirinin etkin olduğu anlamına gelmez.
+Simülasyon panel servisi doğrulanmış açısal hız ve adım seçimini tutar; değerler
+ini sınırları dışında veya bir jog tuşu basılıyken değiştirilemez. Lineer ve
+açısal jog birlikte istenirse simülasyon servisi iki grubu da bütün jog tuşları
+bırakılıncaya dek kilitler. Yalnız sim-5axis profilinde A/B için ayrı HAL
+zinciri, açısal hız/artım ve lineer-açısal geçiş beklemesi eklendi. İzole
+LinuxCNC simülasyonunda FREE ve TELEOP yönleri, artımlı hareket, bırakma,
+lineer/açısal hız geçişi, süreli tuşun istemci bağlantısı kesilince bırakılması
+ve eşzamanlı lineer/açısal kilit sınandı. Hızlı yön değişiminde halui'nin yeni
+hareketi eski yönün dur komutuyla kesebildiği tekrar üretildi; simülasyon
+arbitratörü artık her eksende yön değişiminden önce çıkışları kısa süre bırakır.
+Aynı eksenin iki zıt yönü aynı anda istenirse bütün jog tuşları bırakılana kadar
+hareket engellenir. PROTECT açıkken yapılan izole tekrarda hızlı yön değişimi
+geçti; zıt yön kilidinin panel durumu ve bütün tuşlar bırakılana kadar devamı
+hem soket testinde hem HAL üzerinde doğrulandı. Bu yalnızca söz konusu
+koşullardaki simülasyon doğrulamasıdır.
+
+Önceki farklı bir TELEOP başarısızlığında PROTECT kapalıydı ve uygulamanın
+arka plandaki G54 eşitlemesiyle aynı anda `halui.mode.is-manual` ve teleop
+durumları düştü. Bunun tam mekanizması ve güvenli düzeltmesi ayrıca
+araştırılmalıdır; ilişki zamanlama gözlemidir, kesin kök neden kanıtı değildir.
+Kodda ofset eşitlemesi MDI kipine geçmeyi ister ve daha sonra önceki kipi geri
+ister; kip isteğinin LinuxCNC tarafından gerçekten kabul edildiği ayrıca
+doğrulanmaz. Sadece anlık hareket durumu kontrolü yeni bir jog isteğiyle kip
+geçişi arasındaki yarışı kapatmaz. Yeni bir çözüm ofset doğruluğunu, jog
+isteklerini ve kip geçişini birlikte ele almalı; fiziksel makine davranışı için
+ayrı inceleme gerektirir.
+Limitler, panel sürecinin kaybı ve görsel pencere de ayrıca sınanmalıdır.
 
 ## Hedef
 
@@ -84,7 +135,7 @@ Kaynak incelemesi: [SIM PANEL ve AXIS karşılaştırması](../sim-panel-axis-ka
 - Makinede bulunmayan eksen/spindle öğeleri çizilmesin. Mevcut ama eylem yolu bağlanmamış öğe açıklamayla devre dışı gösterilebilsin. Geri bildirim bağlantısız ve bilinmiyor durumları ayrı olsun.
 - HAL pininin sadece herhangi bir sinyale bağlı olmasını uçtan uca işlevsel kabul etme. Tip/yön/kaynak, writer/reader ve hedef eşleşmesi için doğrulama ve tanı geliştir; post-GUI geç bağlantıları ve tekrar bağlanmayı ele al.
 - `[TRAJ] SPINDLES` varsayılanlarını hedef LinuxCNC sürümüne göre doğrula; mevcut `max(1)` davranışını ve sıfır spindle geçerliliğini uçtan uca araştır. Spindle fonksiyonlarını CW/CCW/fren/geri bildirim olarak ayrı değerlendir.
-- Mevcut 5 eksen sim profilinde A/B'nin eksik panel HAL zincirini ayrı iş olarak tamamla: sürekli/artımlı jog, axis ve joint modları, doğru hız birimleri, yön ve bırakma. Görsel destek ile hareket desteği ayrı doğrulanır.
+- 5 eksen sim profilindeki A/B zincirinin G54 eşitlemesiyle çakışan aralıklı TELEOP başarısızlığını araştır; limit ve panel süreci kaybı testleriyle doğrulamayı tamamla. Görsel destek ile hareket desteği ayrı doğrulanır.
 
 **Doğrulama:** XYZ, XZ, XYZAB, XYZC, XYZUVW, XYYZ, özel kinematik ve çoklu spindle fixture'ları; eksik HAL, geç yükleme, INI/canlı uyuşmazlığı. Hareket testleri yalnız izole simülasyonda.
 

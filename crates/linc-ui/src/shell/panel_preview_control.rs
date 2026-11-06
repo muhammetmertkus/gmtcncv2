@@ -13,12 +13,25 @@ pub(super) struct State {
     pub estop: bool,
     pub protect: bool,
     pub probe_enabled: bool,
+    pub mixed_jog_interlock: bool,
+    pub angular_jog: Option<AngularSettings>,
     pub feed: f64,
     pub rapid: f64,
     pub spindle: f64,
     pub disconnected_buttons: Vec<String>,
     pub active_leds: Vec<String>,
+    pub pressed_buttons: Vec<String>,
     pub checked_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AngularSettings {
+    pub speed: f64,
+    pub max_speed: f64,
+    pub units: String,
+    pub increments: Vec<(String, f64)>,
+    pub increment_index: usize,
+    pub wired: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +43,8 @@ pub(super) enum Command {
     Feed(f64),
     Rapid(f64),
     Spindle(f64),
+    AngularSpeed(f64),
+    AngularIncrement(usize),
     CycleStart,
     CycleStop,
 }
@@ -44,6 +59,8 @@ impl Command {
             Self::Feed(value) => json!({"feed_override": value}),
             Self::Rapid(value) => json!({"rapid_override": value}),
             Self::Spindle(value) => json!({"spindle_override": value}),
+            Self::AngularSpeed(value) => json!({"angular_jog_speed": value}),
+            Self::AngularIncrement(value) => json!({"angular_jog_increment_index": value}),
             Self::CycleStart => json!({"press": ["cycle_start"], "duration_ms": 120}),
             Self::CycleStop => json!({"press": ["cycle_stop"], "duration_ms": 120}),
         }
@@ -134,11 +151,14 @@ fn worker(
                 estop,
                 protect,
                 probe_enabled,
+                mixed_jog_interlock,
+                angular_jog,
                 feed,
                 rapid,
                 spindle,
                 disconnected_buttons,
                 active_leds,
+                pressed_buttons,
             )) = result
             else {
                 break;
@@ -149,11 +169,14 @@ fn worker(
                 estop,
                 protect,
                 probe_enabled,
+                mixed_jog_interlock,
+                angular_jog,
                 feed,
                 rapid,
                 spindle,
                 disconnected_buttons,
                 active_leds,
+                pressed_buttons,
                 checked_at: Some(Instant::now()),
             };
             // A hold is a renewable short lease, never an unbounded press.
@@ -226,7 +249,7 @@ fn worker(
 /// Accept only fresh responses from a connected simulator without a link error.
 fn simulator_estop(
     value: &serde_json::Value,
-) -> Option<(bool, bool, bool, f64, f64, f64, Vec<String>, Vec<String>)> {
+) -> Option<(bool, bool, bool, bool, Option<AngularSettings>, f64, f64, f64, Vec<String>, Vec<String>, Vec<String>)> {
     if value.get("stale")?.as_bool()? {
         return None;
     }
@@ -242,6 +265,8 @@ fn simulator_estop(
         state.get("estop")?.as_bool()?,
         state.get("program_protect")?.as_bool()?,
         state.get("probe_enabled")?.as_bool()?,
+        state.get("mixed_jog_interlock").and_then(|value| value.as_bool()).unwrap_or(false),
+        state.get("angular_jog").and_then(parse_angular_settings),
         state.get("feed_override")?.as_f64()?,
         state.get("rapid_override")?.as_f64()?,
         state.get("spindle_override")?.as_f64()?,
@@ -257,7 +282,24 @@ fn simulator_estop(
             .iter()
             .map(|value| value.as_str().map(str::to_owned))
             .collect::<Option<Vec<_>>>()?,
+        match state.get("pressed") {
+            Some(value) => value.as_array()?.iter().map(|value| value.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>()?,
+            None => Vec::new(),
+        },
     ))
+}
+
+fn parse_angular_settings(value: &serde_json::Value) -> Option<AngularSettings> {
+    let speed = value.get("speed")?.as_f64()?;
+    let max_speed = value.get("max_speed")?.as_f64()?;
+    let units = value.get("units")?.as_str()?.to_owned();
+    let increments: Vec<(String, f64)> = serde_json::from_value(value.get("increments")?.clone()).ok()?;
+    let increment_index = usize::try_from(value.get("increment_index")?.as_u64()?).ok()?;
+    if !speed.is_finite() || speed <= 0.0 || !max_speed.is_finite() || max_speed < speed
+        || increments.is_empty() || increment_index >= increments.len()
+        || increments.iter().any(|(_, number)| !number.is_finite() || *number <= 0.0)
+    { return None; }
+    Some(AngularSettings { speed, max_speed, units, increments, increment_index, wired: value.get("wired")?.as_bool()? })
 }
 
 #[cfg(test)]
@@ -293,7 +335,7 @@ mod tests {
         let mut value = json!({"stale": false, "data": {"armed": true, "state": {"connected": true, "error": false, "estop": true, "program_protect": false, "probe_enabled": false, "feed_override": 1.0, "rapid_override": 1.0, "spindle_override": 1.0, "disconnected_buttons": [], "active_leds": []}}});
         assert_eq!(
             simulator_estop(&value),
-            Some((true, false, false, 1.0, 1.0, 1.0, vec![], vec![]))
+            Some((true, false, false, false, None, 1.0, 1.0, 1.0, vec![], vec![], vec![]))
         );
         value["stale"] = json!(true);
         assert_eq!(simulator_estop(&value), None);
@@ -316,6 +358,11 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let handle = SimPanelHandle::new();
+        let ini = linc_core::ini::MachineIni::parse(
+            std::path::Path::new("configs/sim-5axis.ini"),
+            include_str!("../../../../configs/sim-5axis.ini"),
+        ).unwrap();
+        handle.set(|state| state.configure_angular_jog(&ini));
         let bus = Arc::new(Mutex::new(PanelBus::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let run_stop = stop.clone();
@@ -358,6 +405,11 @@ mod tests {
             }
         };
         wait(&|| control.state().ready);
+        assert!(!control.state().angular_jog.as_ref().unwrap().wired);
+        control.send(Command::AngularSpeed(20.0));
+        wait(&|| handle.snapshot().angular_jog.as_ref().is_some_and(|settings| settings.speed == 20.0));
+        control.send(Command::AngularIncrement(2));
+        wait(&|| handle.snapshot().angular_jog.as_ref().is_some_and(|settings| settings.increment_index == 2));
         control.send(Command::Estop(false));
         wait(&|| !handle.snapshot().estop);
         control.send(Command::Power(true));
@@ -372,6 +424,18 @@ mod tests {
         wait(&|| (handle.snapshot().spindle_override - 1.10).abs() < 0.001);
         control.send(Command::Mode("JOG"));
         wait(&|| handle.snapshot().mode.label() == "JOG");
+        control.set_held(vec!["jog_xp", "jog_ap"], control.state().connection_generation);
+        wait(&|| control.state().mixed_jog_interlock);
+        control.set_held(Vec::new(), control.state().connection_generation);
+        wait(&|| !handle.snapshot().mixed_jog_interlock);
+        wait(&|| !control.state().mixed_jog_interlock);
+        control.set_held(vec!["jog_ap", "jog_an"], control.state().connection_generation);
+        wait(&|| control.state().mixed_jog_interlock);
+        control.set_held(vec!["jog_ap"], control.state().connection_generation);
+        wait(&|| handle.snapshot().buttons & buttons::JOG_AN == 0);
+        assert!(handle.snapshot().mixed_jog_interlock);
+        control.set_held(Vec::new(), control.state().connection_generation);
+        wait(&|| !handle.snapshot().mixed_jog_interlock);
         control.send(Command::CycleStart);
         wait(&|| handle.snapshot().buttons & buttons::CYCLE_START != 0);
         wait(&|| handle.snapshot().buttons & buttons::CYCLE_START == 0);

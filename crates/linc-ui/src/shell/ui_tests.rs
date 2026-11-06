@@ -7295,6 +7295,11 @@ fn embedded_jog_press_and_release_reaches_simulator_socket() {
     use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
     let dir = tempfile::tempdir().unwrap();
     let handle = SimPanelHandle::new();
+    let angular_ini = linc_core::ini::MachineIni::parse(
+        std::path::Path::new("configs/sim-5axis.ini"),
+        include_str!("../../../../configs/sim-5axis.ini"),
+    ).unwrap();
+    handle.set(|state| state.configure_angular_jog(&angular_ini));
     let bus = Arc::new(Mutex::new(PanelBus::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let stop_poll = stop.clone();
@@ -7314,6 +7319,14 @@ fn embedded_jog_press_and_release_reaches_simulator_socket() {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
     let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.profile.machine_ini = linc_core::ini::MachineIni::parse(
+        std::path::Path::new("configs/sim-5axis.ini"),
+        include_str!("../../../../configs/sim-5axis.ini"),
+    ).unwrap();
+    harness.app.profile.config.simulation.panel_keys = vec![
+        linc_core::config::SimPanelKeyConfig { name: "worklamp".into(), label: Some("TASK LIGHT".into()), icon: Some("bulb".into()), hidden: false },
+        linc_core::config::SimPanelKeyConfig { name: "coolant".into(), label: None, icon: None, hidden: true },
+    ];
     harness.app.panel_preview_control = Some(control);
     let draw = |events| {
         let mut input = probe_raw_input(events);
@@ -7326,6 +7339,9 @@ fn embedded_jog_press_and_release_reaches_simulator_socket() {
         output
     };
     let first = draw(vec![]);
+    let labels = painted_text(&first);
+    assert!(labels.iter().any(|(text, _)| text == "TASK LIGHT"));
+    assert!(!labels.iter().any(|(text, _)| text == "COOLANT"));
     let point = painted_text(&first).into_iter().find(|(text, _)| text == "X+").expect("X+ jog key").1.center();
     draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
     while handle.snapshot().buttons & linc_panel::buttons::JOG_XP == 0 {
@@ -7338,6 +7354,79 @@ fn embedded_jog_press_and_release_reaches_simulator_socket() {
         assert!(std::time::Instant::now() < deadline, "X+ release did not reach panel");
         std::thread::sleep(Duration::from_millis(10));
     }
+    let group_id = egui::Id::unique("embedded-panel-group");
+    harness.ctx.data_mut(|data| data.insert_temp(group_id, "JOG"));
+    let jog = draw(vec![]);
+    let jog_labels = painted_text(&jog);
+    assert!(jog_labels.iter().any(|(text, _)| text == "X+"));
+    assert!(jog_labels.iter().any(|(text, _)| text.starts_with("A / J3")));
+    assert!(jog_labels.iter().any(|(text, _)| text.starts_with("B / J4")));
+    assert!(jog_labels.iter().any(|(text, _)| text == "ANGULAR SETTINGS ONLY — JOG NOT CONNECTED"));
+    assert!(jog_labels.iter().any(|(text, _)| text == "ANGULAR degree/s"));
+    assert!(!jog_labels.iter().any(|(text, _)| text.ends_with("CYCLE START")));
+    let slider_label = jog_labels.iter().find(|(text, _)| text == "ANGULAR degree/s").unwrap().1;
+    let slider_point = egui::pos2(slider_label.left() - 90.0, slider_label.center().y);
+    let before_speed = handle.snapshot().angular_jog.unwrap().speed;
+    let clear_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while harness.app.panel_preview_control.as_ref().unwrap().state().pressed_buttons.iter().any(|name| name.starts_with("jog_")) {
+        assert!(std::time::Instant::now() < clear_deadline, "panel jog state stayed pressed");
+        draw(vec![]);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    draw(vec![]);
+    draw(vec![egui::Event::PointerMoved(slider_point), press_at(slider_point, true)]);
+    draw(vec![egui::Event::PointerMoved(slider_point), press_at(slider_point, false)]);
+    let speed_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while (handle.snapshot().angular_jog.unwrap().speed - before_speed).abs() < 0.01 {
+        assert!(std::time::Instant::now() < speed_deadline, "angular slider did not reach panel service");
+        draw(vec![]);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let a_point = painted_text(&draw(vec![])).into_iter().find(|(text, _)| text == "A+").unwrap().1.center();
+    draw(vec![egui::Event::PointerMoved(a_point), press_at(a_point, true)]);
+    draw(vec![egui::Event::PointerMoved(a_point), press_at(a_point, false)]);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(handle.snapshot().buttons & linc_panel::buttons::JOG_AP, 0, "unwired rotary jog must stay disabled");
+    harness.ctx.data_mut(|data| data.insert_temp(group_id, "CONTROL"));
+    let control = draw(vec![]);
+    let control_labels = painted_text(&control);
+    assert!(control_labels.iter().any(|(text, _)| text.ends_with("CYCLE START")));
+    assert!(!control_labels.iter().any(|(text, _)| text == "X+"));
+    harness.ctx.data_mut(|data| data.insert_temp(group_id, "JOG"));
+    let jog = draw(vec![]);
+    let labels = painted_text(&jog);
+    let jog_point = labels.iter().find(|(text, _)| text == "X+").unwrap().1.center();
+    let tab_point = labels.iter().find(|(text, _)| text == "CONTROL").unwrap().1.center();
+    draw(vec![egui::Event::Touch {
+        device_id: egui::TouchDeviceId(1), id: egui::TouchId(17),
+        phase: egui::TouchPhase::Start, pos: jog_point, force: None,
+    }]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while handle.snapshot().buttons & linc_panel::buttons::JOG_XP == 0 {
+        assert!(std::time::Instant::now() < deadline, "touch jog did not start");
+        draw(vec![]);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    draw(vec![egui::Event::PointerMoved(tab_point), press_at(tab_point, true)]);
+    draw(vec![egui::Event::PointerMoved(tab_point), press_at(tab_point, false)]);
+    while handle.snapshot().buttons & linc_panel::buttons::JOG_XP != 0 {
+        assert!(std::time::Instant::now() < deadline, "group change did not release jog");
+        draw(vec![]);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    harness.ctx.data_mut(|data| data.insert_temp(group_id, "ICONS"));
+    let picker = draw(vec![]);
+    let labels = painted_text(&picker);
+    let label_y = labels.iter().find(|(text, _)| text == "TASK LIGHT").unwrap().1.center().y;
+    let picker_pos = labels.iter().find(|(text, rect)| text == "default" && (rect.center().y - label_y).abs() < 10.0).expect("worklamp icon picker").1.center();
+    draw(vec![egui::Event::PointerMoved(picker_pos), press_at(picker_pos, true)]);
+    draw(vec![egui::Event::PointerMoved(picker_pos), press_at(picker_pos, false)]);
+    let open = draw(vec![]);
+    let bulb = painted_text(&open).into_iter().find(|(text, _)| text == "bulb").expect("bulb option").1.center();
+    draw(vec![egui::Event::PointerMoved(bulb), press_at(bulb, true)]);
+    draw(vec![egui::Event::PointerMoved(bulb), press_at(bulb, false)]);
+    let icons = harness.ctx.data_mut(|data| data.get_temp::<std::collections::BTreeMap<String, String>>(egui::Id::unique("embedded-panel-icons"))).unwrap();
+    assert_eq!(icons.get("worklamp").map(String::as_str), Some("bulb"));
     harness.app.panel_preview_control = None;
     drop(server);
     stop.store(true, Ordering::Relaxed);
@@ -7351,13 +7440,50 @@ fn embedded_panel_divider_resizes_with_a_pointer_drag() {
     harness.frame(&[]);
     harness.frame(&[]);
     let before = region(&harness.app, "embedded-sim-panel");
-    let point = egui::pos2(before.right(), before.center().y);
-    let end = point + egui::vec2(90.0, 0.0);
+    let point = egui::pos2(10.0, before.top() - 2.0);
+    let end = point - egui::vec2(0.0, 90.0);
+    harness.frame_full(vec![egui::Event::PointerMoved(point)]);
     harness.frame_full(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
     harness.frame_full(vec![egui::Event::PointerMoved(end)]);
     harness.frame_full(vec![egui::Event::PointerMoved(end), press_at(end, false)]);
     let after = region(&harness.app, "embedded-sim-panel");
-    assert!(after.width() > before.width() + 40.0, "panel did not resize: {before:?} -> {after:?}");
+    assert!(after.height() > before.height() + 40.0, "panel did not resize: {before:?} -> {after:?}");
+    assert!((harness.app.prefs.preferences.sim_panel_height.unwrap() - after.height()).abs() < 1.0);
+}
+
+#[test]
+fn embedded_panel_page_choices_override_defaults_only_for_their_page() {
+    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.embedded_panel_visible = true;
+    harness.app.nav.page = Page::Manual;
+    assert!(harness.app.sim_panel_should_show());
+    harness.app.nav.page = Page::Program;
+    assert!(!harness.app.sim_panel_should_show());
+    harness.app.prefs.preferences.sim_panel_pages.insert("PROGRAM".into(), true);
+    assert!(harness.app.sim_panel_should_show());
+    harness.app.nav.page = Page::Manual;
+    harness.app.prefs.preferences.sim_panel_pages.insert("MANUAL".into(), false);
+    assert!(!harness.app.sim_panel_should_show());
+    harness.app.nav.page = Page::Machine;
+    assert!(harness.app.sim_panel_should_show());
+    harness.app.profile.config.machine.kind = "mill".into();
+    assert!(!harness.app.sim_panel_should_show());
+}
+
+#[test]
+fn embedded_panel_remembers_group_and_icon_selection() {
+    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.embedded_panel_visible = true;
+    harness.ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::unique("embedded-panel-group"), "ICONS");
+        data.insert_temp(
+            egui::Id::unique("embedded-panel-icons"),
+            std::collections::BTreeMap::from([("worklamp".to_string(), "bulb".to_string())]),
+        );
+    });
+    harness.frame(&[]);
+    assert_eq!(harness.app.prefs.preferences.sim_panel_group.as_deref(), Some("ICONS"));
+    assert_eq!(harness.app.prefs.preferences.sim_panel_icons.get("worklamp").map(String::as_str), Some("bulb"));
 }
 
 #[test]
@@ -7388,6 +7514,7 @@ fn every_mill_matrix_button_responds_to_pointer_press_and_release() {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
     let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.profile.machine_ini.coordinates = ["X", "Y", "Z", "A", "B", "C"].map(str::to_owned).to_vec();
     harness.app.panel_preview_control = Some(control);
     let draw = |events| {
         let mut input = probe_raw_input(events);
@@ -7452,6 +7579,7 @@ fn every_lathe_matrix_button_responds_to_pointer_press_and_release() {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
     let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.profile.machine_ini.coordinates = ["X", "Y", "Z", "A", "B", "C"].map(str::to_owned).to_vec();
     harness.app.profile.variant = MachineVariant::Lathe;
     harness.app.profile.config.lathe = Some(linc_core::config::LatheConfig {
         turret_stations: None, power_turret: None, live_tooling: None,

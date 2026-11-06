@@ -494,14 +494,55 @@ impl LincApp {
         // The opt-in simulator view is shown only on operationally relevant pages (Machine, Manual, Homing, Offsets, Probe)
         // or when explicitly toggled open by the operator via the top bar [SIM PANEL] button.
         if self.sim_panel_should_show() {
-            let panel = egui::containers::Panel::left("embedded-sim-panel")
+            let group_id = egui::Id::unique("embedded-panel-group");
+            let saved_group = match self.prefs.preferences.sim_panel_group.as_deref() {
+                Some("CONTROL") => "CONTROL",
+                Some("JOG") => "JOG",
+                Some("FUNCTIONS") => "FUNCTIONS",
+                Some("SPINDLE / MACHINE") => "SPINDLE / MACHINE",
+                Some("ICONS") => "ICONS",
+                _ => "ALL",
+            };
+            ui.ctx().data_mut(|data| {
+                if data.get_temp::<&'static str>(group_id).is_none() {
+                    data.insert_temp(group_id, saved_group);
+                }
+                let icon_id = egui::Id::unique("embedded-panel-icons");
+                if data.get_temp::<std::collections::BTreeMap<String, String>>(icon_id).is_none() {
+                    data.insert_temp(icon_id, self.prefs.preferences.sim_panel_icons.clone());
+                }
+            });
+            let max_height = (screen.height() * 0.45).max(120.0);
+            let default_height = self.prefs.preferences.sim_panel_height
+                .filter(|height| height.is_finite())
+                .unwrap_or(220.0)
+                .clamp(120.0, max_height);
+            let panel = egui::containers::Panel::bottom("embedded-sim-panel")
                 .resizable(true)
-                .default_size(260.0)
-                .min_size(180.0)
-                .max_size((screen.width() * 0.45).max(180.0))
+                .default_size(default_height)
+                .min_size(120.0)
+                .max_size(max_height)
                 .frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::same(10)))
                 .show(ui, |ui| self.draw_panel_preview(ui));
             self.note_region("embedded-sim-panel", panel.response.rect);
+            let height = panel.response.rect.height();
+            if self.prefs.preferences.sim_panel_height.is_none_or(|previous| (previous - height).abs() >= 1.0) {
+                self.prefs.preferences.sim_panel_height = Some(height);
+                self.prefs.dirty = true;
+            }
+            let group = ui.ctx().data_mut(|data| data.get_temp::<&'static str>(group_id));
+            if group != self.prefs.preferences.sim_panel_group.as_deref() {
+                self.prefs.preferences.sim_panel_group = group.map(str::to_owned);
+                self.prefs.dirty = true;
+            }
+            if let Some(icons) = ui.ctx().data_mut(|data| data.get_temp::<std::collections::BTreeMap<String, String>>(egui::Id::unique("embedded-panel-icons"))) {
+                if icons != self.prefs.preferences.sim_panel_icons {
+                    self.prefs.preferences.sim_panel_icons = icons;
+                    self.prefs.dirty = true;
+                }
+            }
+        } else {
+            self.release_embedded_panel_holds(ui.ctx());
         }
         let central = egui::containers::CentralPanel::default()
             .frame(
