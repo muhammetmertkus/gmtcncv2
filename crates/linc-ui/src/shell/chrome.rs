@@ -40,7 +40,7 @@ pub(super) fn cockpit_capsule_custom<R>(
         .fill(bg)
         .stroke(border_stroke)
         .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(9, 4));
+        .inner_margin(egui::Margin::symmetric(8, 2));
     let mut inner = None;
     let resp = frame.show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -75,8 +75,91 @@ pub(super) fn cockpit_chip<R>(
 
 impl LincApp {
     pub(super) fn top_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            // Left Group: Mode, Program, State, Tool, Spindle, Feed, Work, Net
+        // Reserve the right edge for safety badges and hardware status;
+        // Telemetry capsules are allocated inside an independent bounded scroll area,
+        // making collision or overlapping with safety badges physically impossible.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+
+            // 1. Bildirim & Alarm Merkezi [MSG 4 | ALARM 2]
+            let (messages, alarms) = self.log_counts();
+            let has_alarms = alarms > 0;
+            let (alarm_resp, _) = cockpit_capsule_custom(
+                ui,
+                if has_alarms {
+                    Color32::from_rgba_unmultiplied(239, 68, 68, 35)
+                } else {
+                    theme::COCKPIT_CARD
+                },
+                egui::Stroke::new(
+                    1.0,
+                    if has_alarms {
+                        Color32::from_rgba_unmultiplied(239, 68, 68, 120)
+                    } else {
+                        theme::COCKPIT_BORDER
+                    },
+                ),
+                |ui| {
+                    ui.label(
+                        RichText::new(format!("MSG {messages}"))
+                            .monospace()
+                            .size(theme::font_size(10.5))
+                            .color(if messages > 0 { theme::COCKPIT_TEXT_MAIN } else { theme::COCKPIT_TEXT_DIM }),
+                    );
+                    ui.label(
+                        RichText::new("|")
+                            .size(10.0)
+                            .color(theme::COCKPIT_TEXT_DIM),
+                    );
+                    ui.label(
+                        RichText::new(format!("ALARM {alarms}"))
+                            .monospace()
+                            .size(theme::font_size(10.5))
+                            .strong()
+                            .color(if has_alarms { theme::COCKPIT_RED } else { theme::COCKPIT_TEXT_DIM }),
+                    );
+                },
+            );
+            if alarm_resp.clicked() {
+                self.nav.page = Page::Diagnostics;
+            }
+            alarm_resp.on_hover_ui(|ui| {
+                ui.label(RichText::new("SİSTEM BİLDİRİM VE ALARM MERKEZİ").strong().color(theme::COCKPIT_RED));
+                for alarm in self.snapshot.alarms.iter().take(5) {
+                    let colour = match alarm.severity {
+                        linc_core::model::AlarmSeverity::Critical
+                        | linc_core::model::AlarmSeverity::Error => theme::COCKPIT_RED,
+                        linc_core::model::AlarmSeverity::Warning => theme::COCKPIT_AMBER,
+                        linc_core::model::AlarmSeverity::Info => theme::COCKPIT_TEXT_MUTED,
+                    };
+                    let text = linc_core::i18n::translate_cnc_message(&alarm.message);
+                    ui.label(RichText::new(format!("• {text}")).size(11.0).color(colour));
+                }
+            });
+
+            // 2. Donanım Panel / MPG El Çarkı Bağlantı Hapı [🎛 ● PANEL]
+            let online = !self.panel_offline();
+            let (panel_resp, _) = cockpit_chip(ui, |ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 14.0), Sense::hover());
+                ui.painter().rect_stroke(
+                    icon_rect,
+                    2.0,
+                    egui::Stroke::new(1.0, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED }),
+                    StrokeKind::Inside,
+                );
+                ui.painter().circle_filled(icon_rect.center(), 1.5, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED });
+
+                let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter().circle_filled(dot_rect.center(), 3.0, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED });
+
+                ui.label(RichText::new("PANEL").monospace().size(theme::font_size(10.5)).strong().color(Color32::WHITE));
+            });
+            panel_resp.on_hover_text(if online { "PANEL & EL ÇARKI (MPG) AKTİF" } else { "PANEL ÇEVRİMDIŞI" });
+
+            // 3. Güvenlik Rozetleri ([LİMİT OVR], [🛑 ESTOP], vb.)
+            self.status_badges(ui);
+
+            // 4. Sol ve Orta Telemetri Kapsülleri (Kalan alanda soldan sağa dizilim)
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
 
@@ -248,89 +331,6 @@ impl LincApp {
                         ui.label("LinuxCNC PREEMPT_RT çekirdeğinin gecikme (jitter) yaşamaması için harici Wi-Fi/Ethernet denetimi.");
                     });
                 }
-            });
-
-            // Right Group: Alarms/Messages, Hardware Panel, Status Badges
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-
-                // 1. Bildirim & Alarm Merkezi [MSG 4 | ALARM 2]
-                let (messages, alarms) = self.log_counts();
-                let has_alarms = alarms > 0;
-                let (alarm_resp, _) = cockpit_capsule_custom(
-                    ui,
-                    if has_alarms {
-                        Color32::from_rgba_unmultiplied(239, 68, 68, 35)
-                    } else {
-                        theme::COCKPIT_CARD
-                    },
-                    egui::Stroke::new(
-                        1.0,
-                        if has_alarms {
-                            Color32::from_rgba_unmultiplied(239, 68, 68, 120)
-                        } else {
-                            theme::COCKPIT_BORDER
-                        },
-                    ),
-                    |ui| {
-                        ui.label(
-                            RichText::new(format!("MSG {messages}"))
-                                .monospace()
-                                .size(theme::font_size(10.5))
-                                .color(if messages > 0 { theme::COCKPIT_TEXT_MAIN } else { theme::COCKPIT_TEXT_DIM }),
-                        );
-                        ui.label(
-                            RichText::new("|")
-                                .size(10.0)
-                                .color(theme::COCKPIT_TEXT_DIM),
-                        );
-                        ui.label(
-                            RichText::new(format!("ALARM {alarms}"))
-                                .monospace()
-                                .size(theme::font_size(10.5))
-                                .strong()
-                                .color(if has_alarms { theme::COCKPIT_RED } else { theme::COCKPIT_TEXT_DIM }),
-                        );
-                    },
-                );
-                if alarm_resp.clicked() {
-                    self.nav.page = Page::Diagnostics;
-                }
-                alarm_resp.on_hover_ui(|ui| {
-                    ui.label(RichText::new("SİSTEM BİLDİRİM VE ALARM MERKEZİ").strong().color(theme::COCKPIT_RED));
-                    for alarm in self.snapshot.alarms.iter().take(5) {
-                        let colour = match alarm.severity {
-                            linc_core::model::AlarmSeverity::Critical
-                            | linc_core::model::AlarmSeverity::Error => theme::COCKPIT_RED,
-                            linc_core::model::AlarmSeverity::Warning => theme::COCKPIT_AMBER,
-                            linc_core::model::AlarmSeverity::Info => theme::COCKPIT_TEXT_MUTED,
-                        };
-                        let text = linc_core::i18n::translate_cnc_message(&alarm.message);
-                        ui.label(RichText::new(format!("• {text}")).size(11.0).color(colour));
-                    }
-                });
-
-                // 2. Donanım Panel / MPG El Çarkı Bağlantı Hapı [🎛 ● PANEL]
-                let online = !self.panel_offline();
-                let (panel_resp, _) = cockpit_chip(ui, |ui| {
-                    let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 14.0), Sense::hover());
-                    ui.painter().rect_stroke(
-                        icon_rect,
-                        2.0,
-                        egui::Stroke::new(1.0, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED }),
-                        StrokeKind::Inside,
-                    );
-                    ui.painter().circle_filled(icon_rect.center(), 1.5, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED });
-
-                    let (dot_rect, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                    ui.painter().circle_filled(dot_rect.center(), 3.0, if online { theme::COCKPIT_GREEN } else { theme::COCKPIT_RED });
-
-                    ui.label(RichText::new("PANEL").monospace().size(theme::font_size(10.5)).strong().color(Color32::WHITE));
-                });
-                panel_resp.on_hover_text(if online { "PANEL & EL ÇARKI (MPG) AKTİF" } else { "PANEL ÇEVRİMDIŞI" });
-
-                // 3. Güvenlik Rozetleri ([ESTOP], [LIMIT OVR], vb.)
-                self.status_badges(ui);
             });
         });
     }
@@ -582,11 +582,19 @@ impl LincApp {
 
     pub(super) fn status_badges(&mut self, ui: &mut egui::Ui) {
         let size = theme::font_size(10.0);
+        if self.snapshot.limits_overridden {
+            let label = linc_core::i18n::t("shell.badges.limits_override");
+            let tooltip = linc_core::i18n::t("shell.badges.limits_override_tooltip");
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(84.0, 26.0), Sense::hover());
+            ui.painter().rect_filled(rect, 8, Color32::from_rgba_unmultiplied(245, 158, 11, 40));
+            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(10.5)), theme::COCKPIT_AMBER);
+            resp.on_hover_text(tooltip);
+        }
         if self.snapshot.machine.estop {
-            ui.add_space(6.0);
             let label = linc_core::i18n::t("shell.badges.estop");
             let tooltip = linc_core::i18n::t("shell.badges.estop_tooltip");
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(76.0, 26.0), Sense::hover());
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(78.0, 26.0), Sense::hover());
             ui.painter().rect_filled(rect, 8, theme::COCKPIT_RED);
             ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, Color32::from_rgb(0xf8, 0x71, 0x71)), StrokeKind::Inside);
             // Draw mini mushroom stop icon
@@ -595,17 +603,7 @@ impl LincApp {
             ui.painter().circle_filled(egui::pos2(icon_c.x, icon_c.y - 3.0), 4.0, Color32::WHITE);
             ui.painter().rect_filled(egui::Rect::from_center_size(egui::pos2(icon_c.x, icon_c.y + 2.0), Vec2::new(4.0, 4.0)), 1, Color32::WHITE);
             ui.painter().rect_filled(egui::Rect::from_center_size(egui::pos2(icon_c.x, icon_c.y + 5.0), Vec2::new(8.0, 2.0)), 1, Color32::WHITE);
-            ui.painter().text(egui::pos2(rect.left() + 45.0, c.y), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(11.0)), Color32::WHITE);
-            resp.on_hover_text(tooltip);
-        }
-        if self.snapshot.limits_overridden {
-            ui.add_space(6.0);
-            let label = linc_core::i18n::t("shell.badges.limits_override");
-            let tooltip = linc_core::i18n::t("shell.badges.limits_override_tooltip");
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(84.0, 26.0), Sense::hover());
-            ui.painter().rect_filled(rect, 8, Color32::from_rgba_unmultiplied(245, 158, 11, 40));
-            ui.painter().rect_stroke(rect, 8, Stroke::new(1.0, theme::COCKPIT_AMBER), StrokeKind::Inside);
-            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(10.5)), theme::COCKPIT_AMBER);
+            ui.painter().text(egui::pos2(rect.left() + 46.0, c.y), Align2::CENTER_CENTER, label, FontId::monospace(theme::font_size(11.0)), Color32::WHITE);
             resp.on_hover_text(tooltip);
         }
         if let Some(fault) = self.snapshot.probe_trip.clone() {

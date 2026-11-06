@@ -8,138 +8,127 @@ pub(super) fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Pag
     let c = rect.center();
     match page {
         Page::Machine => {
-            // 3 Eksenli CNC Portal & Spindle Gövdesi
-            let base_rect = egui::Rect::from_min_max(
-                egui::pos2(rect.left() + 2.0, rect.bottom() - 4.5),
-                egui::pos2(rect.right() - 2.0, rect.bottom() - 1.0),
-            );
-            painter.rect_stroke(base_rect, 1.0, s, StrokeKind::Inside);
-            let arch = [
-                egui::pos2(rect.left() + 3.5, rect.bottom() - 4.5),
-                egui::pos2(rect.left() + 3.5, rect.top() + 2.0),
-                egui::pos2(rect.right() - 3.5, rect.top() + 2.0),
-                egui::pos2(rect.right() - 3.5, rect.bottom() - 4.5),
-            ];
-            for pair in arch.windows(2) {
+            // Hız Kadranı / Takometre Yayı + İbre (HTML Prototip ⏱)
+            let r = 7.0;
+            let start_angle = std::f32::consts::PI * 0.75; // 135 derece
+            let end_angle = std::f32::consts::PI * 2.25;   // 405 derece
+            let steps = 14;
+            let mut pts = Vec::with_capacity(steps + 1);
+            for i in 0..=steps {
+                let a = start_angle + (end_angle - start_angle) * (i as f32 / steps as f32);
+                let (sin, cos) = a.sin_cos();
+                pts.push(egui::pos2(c.x + cos * r, c.y + sin * r));
+            }
+            for pair in pts.windows(2) {
                 painter.line_segment([pair[0], pair[1]], s);
             }
+            // Uç çentikleri
+            let (s_sin, s_cos) = start_angle.sin_cos();
             painter.line_segment(
-                [egui::pos2(c.x, rect.top() + 2.0), egui::pos2(c.x, c.y + 1.5)],
+                [egui::pos2(c.x + s_cos * (r - 2.0), c.y + s_sin * (r - 2.0)), egui::pos2(c.x + s_cos * r, c.y + s_sin * r)],
+                s,
+            );
+            let (e_sin, e_cos) = end_angle.sin_cos();
+            painter.line_segment(
+                [egui::pos2(c.x + e_cos * (r - 2.0), c.y + e_sin * (r - 2.0)), egui::pos2(c.x + e_cos * r, c.y + e_sin * r)],
+                s,
+            );
+            // Sağ üste doğru ibre (~45 derece)
+            let needle_angle = -std::f32::consts::FRAC_PI_4;
+            let (n_sin, n_cos) = needle_angle.sin_cos();
+            painter.line_segment(
+                [c, egui::pos2(c.x + n_cos * (r - 1.5), c.y + n_sin * (r - 1.5))],
                 egui::Stroke::new(1.8, color),
             );
-            painter.circle_filled(egui::pos2(c.x, c.y + 2.5), 1.5, color);
+            painter.circle_filled(c, 1.8, color);
         }
         Page::Program => {
-            // G-CODE Doküman Sayfası (Kıvrımlı Köşe) + 6 Dişli Endüstriyel Çark
-            let stroke = egui::Stroke::new(1.3, color);
-            let left = rect.left() + 2.0;
-            let right = rect.right() - 2.0;
+            // G-Kodu Doküman Sayfası (Kıvrımlı Köşe) + Sağ Alt Dişli Çark (Referans Görsel Birebir 📄⚙)
+            let left = rect.left() + 2.5;
+            let right = rect.right() - 2.5;
             let top = rect.top() + 1.0;
             let bottom = rect.bottom() - 1.0;
-            let fold = 4.0;
+            let fold = 3.5;
 
-            // Sayfa dış çizgileri
-            let sheet_pts = [
-                egui::pos2(left, top),
-                egui::pos2(right - fold, top),
-                egui::pos2(right, top + fold),
-                egui::pos2(right, bottom - 5.5),
-            ];
-            for pair in sheet_pts.windows(2) {
-                painter.line_segment([pair[0], pair[1]], stroke);
-            }
-            painter.line_segment([egui::pos2(left, top), egui::pos2(left, bottom)], stroke);
-            painter.line_segment([egui::pos2(left, bottom), egui::pos2(right - 5.5, bottom)], stroke);
+            // Doküman dış çizgileri
+            painter.line_segment([egui::pos2(left, top), egui::pos2(right - fold, top)], s);
+            painter.line_segment([egui::pos2(right - fold, top), egui::pos2(right, top + fold)], s);
+            painter.line_segment([egui::pos2(right, top + fold), egui::pos2(right, bottom - 5.5)], s);
+            painter.line_segment([egui::pos2(left, top), egui::pos2(left, bottom)], s);
+            painter.line_segment([egui::pos2(left, bottom), egui::pos2(right - 5.5, bottom)], s);
 
             // Kıvrım üçgeni
-            painter.line_segment([egui::pos2(right - fold, top), egui::pos2(right - fold, top + fold)], stroke);
-            painter.line_segment([egui::pos2(right - fold, top + fold), egui::pos2(right, top + fold)], stroke);
-
-            // "G" Harfi
-            painter.text(
-                egui::pos2(left + 4.0, top + 5.0),
-                Align2::CENTER_CENTER,
-                "G",
-                FontId::proportional(theme::font_size(7.0)),
-                color,
-            );
+            painter.line_segment([egui::pos2(right - fold, top), egui::pos2(right - fold, top + fold)], s);
+            painter.line_segment([egui::pos2(right - fold, top + fold), egui::pos2(right, top + fold)], s);
 
             // G-Kodu Satırları
-            painter.line_segment(
-                [egui::pos2(left + 2.0, bottom - 5.0), egui::pos2(left + 5.5, bottom - 5.0)],
-                egui::Stroke::new(0.9, color),
-            );
-            painter.line_segment(
-                [egui::pos2(left + 2.0, bottom - 3.0), egui::pos2(left + 4.5, bottom - 3.0)],
-                egui::Stroke::new(0.9, color),
-            );
+            let ls = egui::Stroke::new(1.1, color);
+            painter.line_segment([egui::pos2(left + 2.5, top + 5.0), egui::pos2(left + 5.5, top + 5.0)], ls);
+            painter.line_segment([egui::pos2(left + 2.5, top + 7.8), egui::pos2(left + 7.5, top + 7.8)], ls);
+            painter.line_segment([egui::pos2(left + 2.5, top + 10.6), egui::pos2(left + 5.0, top + 10.6)], ls);
 
-            // 6 Dişli Endüstriyel Makine Çarkı (Sağ Alt)
-            let gear_c = egui::pos2(right - 3.0, bottom - 3.0);
-            let gear_r = 3.5;
-            painter.circle_filled(gear_c, gear_r, theme::PANEL_RAISED);
-            painter.circle_stroke(gear_c, gear_r, stroke);
+            // Sağ alt 6-dişli çark
+            let gc = egui::pos2(right - 2.0, bottom - 2.0);
+            let gr = 3.2;
+            painter.circle_stroke(gc, gr, egui::Stroke::new(1.2, color));
+            painter.circle_filled(gc, 1.2, color);
             for i in 0..6 {
-                let angle = i as f32 * std::f32::consts::PI / 3.0 - std::f32::consts::FRAC_PI_2;
-                let (sin, cos) = angle.sin_cos();
-                let inner = egui::pos2(gear_c.x + cos * (gear_r - 0.4), gear_c.y + sin * (gear_r - 0.4));
-                let outer = egui::pos2(gear_c.x + cos * (gear_r + 1.2), gear_c.y + sin * (gear_r + 1.2));
-                painter.line_segment([inner, outer], egui::Stroke::new(1.2, color));
+                let a = i as f32 * std::f32::consts::PI / 3.0;
+                let (sin, cos) = a.sin_cos();
+                painter.line_segment(
+                    [egui::pos2(gc.x + cos * (gr - 0.4), gc.y + sin * (gr - 0.4)),
+                     egui::pos2(gc.x + cos * (gr + 1.5), gc.y + sin * (gr + 1.5))],
+                    egui::Stroke::new(1.3, color),
+                );
             }
-            painter.circle_filled(gear_c, 1.3, theme::SURFACE);
-            painter.circle_stroke(gear_c, 1.3, egui::Stroke::new(0.7, color));
+        }
+        Page::Tools => {
+            // Endüstriyel Açık Ağız İngiliz Anahtarı (HTML Prototip 🔧)
+            let handle_start = egui::pos2(c.x - 5.5, c.y + 5.5);
+            let head_center = egui::pos2(c.x + 2.0, c.y - 2.0);
+            // Anahtar sapı
+            painter.line_segment([handle_start, head_center], egui::Stroke::new(2.3, color));
+            // Anahtar açık ağız kavis ve çeneleri
+            let _jaw_angle = -std::f32::consts::FRAC_PI_4; // 45 derece sap açısı
+            let p_left = egui::pos2(head_center.x - 2.8, head_center.y - 2.8);
+            let p_right = egui::pos2(head_center.x + 2.8, head_center.y + 2.8);
+            let jaw_top_left = egui::pos2(head_center.x - 1.2, head_center.y - 4.8);
+            let jaw_top_right = egui::pos2(head_center.x + 4.8, head_center.y + 1.2);
+            let jaw_inner = egui::pos2(head_center.x + 0.5, head_center.y - 0.5);
+
+            painter.line_segment([p_left, jaw_top_left], egui::Stroke::new(1.5, color));
+            painter.line_segment([jaw_top_left, jaw_inner], egui::Stroke::new(1.4, color));
+            painter.line_segment([jaw_inner, jaw_top_right], egui::Stroke::new(1.4, color));
+            painter.line_segment([jaw_top_right, p_right], egui::Stroke::new(1.5, color));
+            painter.line_segment([p_left, p_right], egui::Stroke::new(1.5, color));
         }
         Page::Offsets => {
-            // Parça Sıfırı WCS Koordinat Hedefi (⊕)
-            painter.circle_stroke(c, 6.5, s);
+            // WCS Datum Parça Sıfırı Hedefi (⊕) (HTML Prototip ⊕)
+            painter.circle_stroke(c, 6.2, s);
             painter.circle_filled(c, 1.8, color);
             painter.line_segment([egui::pos2(c.x, rect.top() + 1.5), egui::pos2(c.x, rect.bottom() - 1.5)], s);
             painter.line_segment([egui::pos2(rect.left() + 1.5, c.y), egui::pos2(rect.right() - 1.5, c.y)], s);
         }
-        Page::Tools => {
-            // Helisel Parmak Freze Ucu (Fluted End Mill)
-            let shank_w = 4.0;
-            let cutter_w = 7.0;
-            let shank = egui::Rect::from_min_max(
-                egui::pos2(c.x - shank_w / 2.0, rect.top() + 1.5),
-                egui::pos2(c.x + shank_w / 2.0, c.y - 1.0),
-            );
-            let cutter = egui::Rect::from_min_max(
-                egui::pos2(c.x - cutter_w / 2.0, c.y - 1.0),
-                egui::pos2(c.x + cutter_w / 2.0, rect.bottom() - 1.5),
-            );
-            painter.rect_stroke(shank, 1.0, egui::Stroke::new(1.1, color), StrokeKind::Inside);
-            painter.rect_stroke(cutter, 1.0, egui::Stroke::new(1.1, color), StrokeKind::Inside);
-            painter.line_segment(
-                [egui::pos2(c.x - cutter_w / 2.0 + 1.0, c.y + 1.5), egui::pos2(c.x + cutter_w / 2.0 - 1.0, c.y + 3.5)],
-                egui::Stroke::new(1.0, color),
-            );
-            painter.line_segment(
-                [egui::pos2(c.x - cutter_w / 2.0 + 1.0, c.y + 4.5), egui::pos2(c.x + cutter_w / 2.0 - 1.0, c.y + 6.5)],
-                egui::Stroke::new(1.0, color),
-            );
-        }
         Page::Diagnostics => {
-            // Endüstriyel Osiloskop & Sayısal HAL Sinyal Analizörü
-            painter.rect_stroke(rect.shrink(1.5), 2.0, s, StrokeKind::Inside);
-            let wave_pts = [
-                egui::pos2(rect.left() + 3.5, c.y + 2.5),
-                egui::pos2(rect.left() + 6.5, c.y + 2.5),
-                egui::pos2(rect.left() + 6.5, c.y - 3.0),
-                egui::pos2(rect.left() + 11.5, c.y - 3.0),
-                egui::pos2(rect.left() + 11.5, c.y + 2.5),
-                egui::pos2(rect.right() - 3.5, c.y + 2.5),
+            // Endüstriyel Osiloskop & HAL Sinyal Dalga Formu (HTML Prototip ~●~)
+            let pts = [
+                egui::pos2(rect.left() + 1.5, c.y),
+                egui::pos2(c.x - 4.5, c.y),
+                egui::pos2(c.x - 2.0, c.y - 5.5),
+                egui::pos2(c.x + 1.0, c.y + 4.5),
+                egui::pos2(c.x + 3.5, c.y),
+                egui::pos2(rect.right() - 1.5, c.y),
             ];
-            for pair in wave_pts.windows(2) {
-                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.3, color));
+            for pair in pts.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.4, color));
             }
+            painter.circle_filled(egui::pos2(c.x - 2.0, c.y - 5.5), 1.6, color);
         }
         Page::Help => {
-            let book = rect.shrink(2.0);
-            painter.rect_stroke(book, 2, s, StrokeKind::Inside);
-            painter.line_segment([egui::pos2(c.x, book.top()), egui::pos2(c.x, book.bottom())], egui::Stroke::new(1.0, color));
+            // Daire İçi Soru İşareti: (?) (HTML Prototip (?))
+            painter.circle_stroke(c, 6.5, s);
             painter.text(
-                egui::pos2(c.x, c.y - 1.0),
+                egui::pos2(c.x, c.y - 0.5),
                 Align2::CENTER_CENTER,
                 "?",
                 FontId::proportional(theme::font_size(10.0)),
@@ -683,9 +672,9 @@ impl LincApp {
                 if en_active { Color32::WHITE } else { theme::COCKPIT_TEXT_DIM },
             );
 
-            // 3. Kısayollar & G-Code Yardım Menüsü (Book Icon + "SHORTCUTS ▾")
+            // 3. Kısayollar & G-Code Yardım Menüsü ((?) Icon + "SHORTCUTS ▾")
             let (menu_rect, menu_response) =
-                ui.allocate_exact_size(Vec2::new(115.0, 36.0), Sense::CLICK);
+                ui.allocate_exact_size(Vec2::new(115.0, 32.0), Sense::CLICK);
             let menu_hovered = menu_response.hovered();
             ui.painter().rect_filled(
                 menu_rect,
@@ -698,15 +687,15 @@ impl LincApp {
                 Stroke::new(1.0, if menu_hovered { theme::COCKPIT_BORDER_ACTIVE } else { theme::COCKPIT_BORDER }),
                 StrokeKind::Inside,
             );
-            // Endüstriyel El Kitabı İkonu
-            let b_icon_rect = egui::Rect::from_center_size(
-                egui::pos2(menu_rect.left() + 14.0, menu_rect.center().y),
-                Vec2::splat(13.0),
-            );
-            ui.painter().rect_stroke(b_icon_rect, 2, Stroke::new(1.1, theme::COCKPIT_CYAN), StrokeKind::Inside);
-            ui.painter().line_segment(
-                [egui::pos2(b_icon_rect.center().x, b_icon_rect.top()), egui::pos2(b_icon_rect.center().x, b_icon_rect.bottom())],
-                Stroke::new(0.9, theme::COCKPIT_CYAN),
+            // (?) Soru İkonu
+            let q_c = egui::pos2(menu_rect.left() + 14.0, menu_rect.center().y);
+            ui.painter().circle_stroke(q_c, 6.0, Stroke::new(1.2, theme::COCKPIT_CYAN));
+            ui.painter().text(
+                egui::pos2(q_c.x, q_c.y - 0.5),
+                Align2::CENTER_CENTER,
+                "?",
+                FontId::proportional(theme::font_size(9.5)),
+                theme::COCKPIT_CYAN,
             );
             ui.painter().text(
                 egui::pos2(menu_rect.left() + 25.0, menu_rect.center().y),
@@ -758,7 +747,7 @@ impl LincApp {
             let is_sim = self.is_sim();
             let is_open = self.sim_panel_should_show();
             let (sim_rect, sim_resp) =
-                ui.allocate_exact_size(Vec2::new(170.0, 36.0), Sense::CLICK);
+                ui.allocate_exact_size(Vec2::new(165.0, 32.0), Sense::CLICK);
             let sim_hovered = sim_resp.hovered();
             ui.painter().rect_filled(
                 sim_rect,
@@ -773,8 +762,8 @@ impl LincApp {
             );
             // Amber SIM chip
             let sim_pill_rect = egui::Rect::from_center_size(
-                egui::pos2(sim_rect.left() + 22.0, sim_rect.center().y),
-                Vec2::new(32.0, 18.0),
+                egui::pos2(sim_rect.left() + 20.0, sim_rect.center().y),
+                Vec2::new(30.0, 17.0),
             );
             let sim_bg = if is_open {
                 theme::COCKPIT_AMBER
@@ -797,7 +786,7 @@ impl LincApp {
             );
             // Machine name
             ui.painter().text(
-                egui::pos2(sim_rect.left() + 42.0, sim_rect.center().y),
+                egui::pos2(sim_rect.left() + 39.0, sim_rect.center().y),
                 Align2::LEFT_CENTER,
                 &self.profile.config.machine.name,
                 FontId::proportional(theme::font_size(10.5)),
@@ -805,7 +794,7 @@ impl LincApp {
             );
             // FPS
             ui.painter().text(
-                egui::pos2(sim_rect.right() - 16.0, sim_rect.center().y),
+                egui::pos2(sim_rect.right() - 15.0, sim_rect.center().y),
                 Align2::RIGHT_CENTER,
                 format!("{:.0} FPS", self.fps),
                 FontId::monospace(theme::font_size(9.0)),
@@ -813,7 +802,7 @@ impl LincApp {
             );
             // Arrow
             ui.painter().text(
-                egui::pos2(sim_rect.right() - 7.0, sim_rect.center().y),
+                egui::pos2(sim_rect.right() - 6.0, sim_rect.center().y),
                 Align2::CENTER_CENTER,
                 "▾",
                 FontId::monospace(theme::font_size(8.0)),
@@ -842,13 +831,13 @@ impl LincApp {
                 }
             });
 
-            // 5. Sol Sekme Alanı: ScrollArea içinde 6 Navigasyon Butonu
+            // 5. Sol Sekme Alanı: HTML Prototipi ile Birebir Tek Satırlı Şık Sekmeler
             egui::ScrollArea::horizontal()
                 .id_salt("navigation-tabs")
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().item_spacing.x = 8.0;
                         for (index, page) in self.nav.pages.clone().iter().enumerate() {
                             let Some((_, label, keycap)) =
                                 NAV_ITEMS.iter().find(|(entry, _, _)| entry == page)
@@ -863,10 +852,14 @@ impl LincApp {
 
                             let label_w = theme::measure(ui, label, 11.0);
                             let keycap_w = theme::measure(ui, &keycap, 8.5);
-                            let width = (label_w.max(keycap_w) + 48.0).max(105.0);
+                            let width = if selected {
+                                16.0 + 16.0 + label_w + 8.0 + keycap_w + 14.0
+                            } else {
+                                12.0 + 16.0 + label_w + 6.0 + keycap_w + 10.0
+                            };
 
                             let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(width, 38.0),
+                                Vec2::new(width, 32.0),
                                 Sense::CLICK,
                             );
                             let hovered = response.hovered();
@@ -889,18 +882,18 @@ impl LincApp {
                             };
 
                             let painter = ui.painter();
-                            painter.rect_filled(rect, 8, card_bg);
+                            painter.rect_filled(rect, 10, card_bg);
                             painter.rect_stroke(
                                 rect,
-                                8,
-                                Stroke::new(if focused { 2.0 } else { 1.0 }, card_border),
+                                10,
+                                Stroke::new(1.0, card_border),
                                 StrokeKind::Inside,
                             );
 
                             let icon_color = if selected {
                                 Color32::WHITE
                             } else if hovered {
-                                Color32::from_rgb(0x93, 0xc5, 0xfd)
+                                Color32::WHITE
                             } else {
                                 theme::COCKPIT_TEXT_MUTED
                             };
@@ -909,50 +902,52 @@ impl LincApp {
                             } else if hovered {
                                 Color32::WHITE
                             } else {
-                                theme::COCKPIT_TEXT_MAIN
+                                theme::COCKPIT_TEXT_MUTED
                             };
 
+                            let icon_x = rect.left() + (if selected { 13.0 } else { 10.0 });
                             draw_nav_icon(
                                 painter,
                                 egui::Rect::from_center_size(
-                                    egui::pos2(rect.left() + 16.0, rect.center().y),
-                                    Vec2::splat(20.0),
+                                    egui::pos2(icon_x, rect.center().y),
+                                    Vec2::splat(18.0),
                                 ),
                                 *page,
                                 icon_color,
                             );
 
+                            let text_x = icon_x + 13.0;
                             painter.text(
-                                egui::pos2(rect.left() + 32.0, rect.center().y - 7.0),
+                                egui::pos2(text_x, rect.center().y),
                                 Align2::LEFT_CENTER,
                                 *label,
                                 FontId::proportional(theme::font_size(11.0)),
                                 label_color,
                             );
 
-                            // Enclosed keycap badge pill
-                            let pill_rect = egui::Rect::from_min_size(
-                                egui::pos2(rect.left() + 31.0, rect.center().y + 1.0),
-                                Vec2::new(keycap_w + 10.0, 14.0),
-                            );
-                            let pill_bg = if selected {
-                                Color32::from_rgba_unmultiplied(255, 255, 255, 55)
+                            let keycap_x = text_x + label_w + 6.0;
+                            if selected {
+                                let pill_rect = egui::Rect::from_center_size(
+                                    egui::pos2(keycap_x + keycap_w / 2.0 + 3.0, rect.center().y),
+                                    Vec2::new(keycap_w + 8.0, 16.0),
+                                );
+                                painter.rect_filled(pill_rect, 4, Color32::from_rgba_unmultiplied(255, 255, 255, 55));
+                                painter.text(
+                                    pill_rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    &keycap,
+                                    FontId::monospace(theme::font_size(8.5)),
+                                    Color32::WHITE,
+                                );
                             } else {
-                                Color32::from_rgb(0x10, 0x15, 0x20)
-                            };
-                            let pill_text_color = if selected {
-                                Color32::WHITE
-                            } else {
-                                theme::COCKPIT_TEXT_MUTED
-                            };
-                            painter.rect_filled(pill_rect, 3, pill_bg);
-                            painter.text(
-                                pill_rect.center(),
-                                Align2::CENTER_CENTER,
-                                &keycap,
-                                FontId::monospace(theme::font_size(8.5)),
-                                pill_text_color,
-                            );
+                                painter.text(
+                                    egui::pos2(keycap_x, rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    &keycap,
+                                    FontId::monospace(theme::font_size(8.5)),
+                                    theme::COCKPIT_TEXT_DIM,
+                                );
+                            }
 
                             if response.clicked() {
                                 ui.memory_mut(|memory| memory.stop_text_input());
