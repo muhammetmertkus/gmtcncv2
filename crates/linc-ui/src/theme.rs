@@ -44,6 +44,8 @@ pub const TOP_BAR_HEIGHT: f32 = 48.0;
 pub const BOTTOM_BAR_HEIGHT: f32 = 36.0;
 pub const STATUS_LINE_HEIGHT: f32 = 20.0;
 pub const NAV_WIDTH: f32 = 172.0;
+/// Height of the horizontal navigation targets.
+pub const NAV_BAR_HEIGHT: f32 = 48.0;
 pub const MIN_TARGET: f32 = 44.0;
 /// Gap between two navigation rows.
 ///

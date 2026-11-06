@@ -2532,6 +2532,7 @@ fn calibration_panel(app: &mut LincApp, ui: &mut Ui) {
     #[cfg_attr(not(test), allow(unused_variables))]
     let card_top = ui.cursor().min.y;
     ui.spacing_mut().interact_size.y = 12.0;
+    ui.spacing_mut().item_spacing.y = 2.0;
     ui.spacing_mut().button_padding.y = 1.0;
     ui.style_mut().text_styles.insert(
         egui::TextStyle::Body,
@@ -2551,7 +2552,7 @@ fn calibration_panel(app: &mut LincApp, ui: &mut Ui) {
         ui.add_space(4.0);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                Vec2::new(390.0, 276.0),
+                Vec2::new(390.0, 260.0),
                 egui::Layout::top_down(Align::Min),
                 |ui| {
                     for row in CALIBRATE.chunks(2) {
@@ -2565,7 +2566,7 @@ fn calibration_panel(app: &mut LincApp, ui: &mut Ui) {
                                     card,
                                     app.probe.operation == card.operation,
                                     190.0,
-                                    128.0,
+                                    120.0,
                                     texture.as_ref(),
                                 );
                                 #[cfg(test)]
@@ -2649,7 +2650,7 @@ fn calibration_panel(app: &mut LincApp, ui: &mut Ui) {
                         calibration_focus_ring(ui, y.rect);
                     }
                 });
-                ui.add_space(theme::font_size(9.0));
+                ui.add_space(1.0);
                 ui.label(
                     RichText::new(
                         "CALIBRATION OFFSET IS READ-ONLY; U/RUN CANNOT OVERWRITE NEW CALIBRATION.",

@@ -1,4 +1,4 @@
-//! LiNC application shell: fixed top/left/bottom chrome, keyboard model,
+//! LiNC application shell: fixed top and bottom chrome, keyboard model,
 //! mode-driven page switching, safety banners and modal confirmations.
 //!
 //! `LincApp` holds the state; every other file here carries one concern's
@@ -36,6 +36,8 @@ mod hints;
 mod jog;
 mod keyboard;
 mod nav;
+mod panel_preview;
+mod panel_preview_control;
 mod prefs;
 mod program;
 mod status;
@@ -114,6 +116,10 @@ pub struct LincApp {
     pub(super) view: ViewState,
     pub(super) following: FollowError,
     pub(super) chrome: ChromeUi,
+    panel_preview_control: Option<panel_preview_control::PanelPreviewControl>,
+    pub embedded_panel_visible: bool,
+    pub sim_panel_force_show: bool,
+    pub show_dro_cards: bool,
 }
 
 impl LincApp {
@@ -141,14 +147,28 @@ impl LincApp {
         } else {
             linc_core::editor::Editor::new()
         };
+        let initial_offset = if let Some(text) = &snapshot.program.content {
+            let index = linc_core::gcode::program_wcs(text).or(snapshot.offsets.active_index);
+            index
+                .and_then(|idx| {
+                    snapshot
+                        .offsets
+                        .offsets
+                        .iter()
+                        .find(|r| r.index == idx)
+                        .map(|r| r.values.clone())
+                })
+                .or_else(|| active_offset(&snapshot).cloned())
+        } else {
+            active_offset(&snapshot).cloned()
+        };
         let mut preview = Preview::empty();
         if let Some(text) = &snapshot.program.content {
             let axes = profile.machine_ini.axis_names();
-            let offset = active_offset(&snapshot);
             preview = parse_preview_full(
                 text,
                 &axes,
-                offset,
+                initial_offset.as_ref(),
                 [0.0; 3],
                 &profile.subroutines(),
                 &Tools::from_rows(&snapshot.tool_table.rows),
@@ -216,7 +236,17 @@ impl LincApp {
         // once before the first machine action. The full text is in the
         // manual; the dialog carries the substance and the two answers.
         let safety_gate = !preferences.safety_notice_accepted();
+        let panel_preview_control = if profile.config.machine.kind == "sim"
+            && std::env::var_os("LINC_EMBEDDED_PANEL_PREVIEW").as_deref() == Some(std::ffi::OsStr::new("1"))
+        {
+            Some(panel_preview_control::PanelPreviewControl::new(profile.config.machine.name.clone()))
+        } else { None };
+        let embedded_panel_visible = panel_preview_control.is_some();
         let mut app = Self {
+            show_dro_cards: false,
+            embedded_panel_visible,
+            sim_panel_force_show: false,
+            panel_preview_control,
             snapshot: snapshot.clone(),
             graph_style,
             program: ProgramUi {
@@ -232,6 +262,9 @@ impl LincApp {
                 } else {
                     linc_view::ViewMode::Iso3d
                 },
+                fit_requested: true,
+                graph_auto_fit: true,
+                preview_offset: initial_offset,
                 pending_load: false,
                 program_was_running: false,
                 ..Default::default()
@@ -430,6 +463,15 @@ impl LincApp {
         };
         self.diagnostics.frame_time_ms = ui.ctx().input(|input| input.unstable_dt * 1000.0);
         ui.painter().rect_filled(ui.max_rect(), 0.0, theme::SURFACE);
+        let nav = egui::containers::Panel::top("linc-nav")
+            .exact_size(theme::NAV_BAR_HEIGHT)
+            .frame(
+                Frame::new()
+                    .fill(theme::SURFACE)
+                    .inner_margin(Margin::symmetric(10, 2)),
+            )
+            .show(ui, |ui| self.draw_nav(ui));
+        self.note_region("nav", nav.response.rect);
         let top_bar = egui::containers::Panel::top("linc-top")
             .exact_size(theme::TOP_BAR_HEIGHT)
             .frame(
@@ -449,16 +491,18 @@ impl LincApp {
             )
             .show(ui, |ui| self.bottom_bar(ui));
         self.note_region("bottom-bar", bottom_bar.response.rect);
-        let nav = egui::containers::Panel::left("linc-nav")
-            .exact_size(theme::NAV_WIDTH)
-            .resizable(false)
-            .frame(
-                Frame::new()
-                    .fill(theme::SURFACE)
-                    .inner_margin(Margin::symmetric(10, 8)),
-            )
-            .show(ui, |ui| self.draw_nav(ui));
-        self.note_region("nav", nav.response.rect);
+        // The opt-in simulator view is shown only on operationally relevant pages (Machine, Manual, Homing, Offsets, Probe)
+        // or when explicitly toggled open by the operator via the top bar [SIM PANEL] button.
+        if self.sim_panel_should_show() {
+            let panel = egui::containers::Panel::left("embedded-sim-panel")
+                .resizable(true)
+                .default_size(260.0)
+                .min_size(180.0)
+                .max_size((screen.width() * 0.45).max(180.0))
+                .frame(Frame::new().fill(theme::PANEL).inner_margin(Margin::same(10)))
+                .show(ui, |ui| self.draw_panel_preview(ui));
+            self.note_region("embedded-sim-panel", panel.response.rect);
+        }
         let central = egui::containers::CentralPanel::default()
             .frame(
                 Frame::new()

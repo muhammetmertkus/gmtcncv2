@@ -6,7 +6,9 @@ use linc_core::gcode::{lex_line, Preview, TokenKind};
 use linc_core::model::{
     format_clock, AxisMap, MachineSnapshot, MachineVariant, PanelMode, PositionSet,
 };
-use linc_view::{draw_trajectory, TrajectoryView, ViewMode};
+use linc_view::{
+    draw_trajectory, CutterType, HudAxis, HudOffset, HudOverlay, TrajectoryView, ViewMode,
+};
 
 use crate::shell::LincApp;
 use crate::state::Page;
@@ -205,68 +207,391 @@ pub fn card_title(ui: &mut Ui, text: &str) {
     );
 }
 
-/// Toolpath status line: keys on the left. Every toolpath card draws it, so no
-/// card needs a legend over the drawing.
-///
-/// The right-hand end is left empty here: the card only knows its viewport
-/// width after it has drawn, so `toolpath_status` fills it. Returns the row it
-/// used, which is where that status goes.
-pub fn toolpath_header(ui: &mut Ui, remaining: bool) -> egui::Rect {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum IndicatorShape {
+    Dot(egui::Color32),
+    DashedLine(egui::Color32),
+    Triangle(egui::Color32),
+    Box(egui::Color32),
+    WireBox(egui::Color32),
+    Grid(egui::Color32),
+}
+
+fn toggle_pill(
+    ui: &mut egui::Ui,
+    label: &str,
+    tooltip: &str,
+    active: bool,
+    indicator: IndicatorShape,
+) -> egui::Response {
+    let font_id = egui::FontId::monospace(theme::font_size(8.5));
+    let padding_x = 5.0;
+    let row_height = 18.0;
+    let icon_w = 12.0;
+    let text_w = if !label.is_empty() {
+        ui.painter()
+            .layout_no_wrap(label.to_string(), font_id.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+    } else {
+        0.0
+    };
+    let total_w = icon_w + text_w + padding_x * 2.0;
+
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(total_w, row_height), egui::Sense::click());
+    let hovered = response.hovered();
+
+    let bg = if active {
+        if hovered {
+            egui::Color32::from_rgba_unmultiplied(38, 75, 125, 230)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(26, 52, 90, 200)
+        }
+    } else if hovered {
+        egui::Color32::from_rgba_unmultiplied(35, 45, 60, 200)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(20, 25, 34, 160)
+    };
+
+    let stroke_color = if active {
+        if hovered {
+            egui::Color32::from_rgb(70, 160, 255)
+        } else {
+            egui::Color32::from_rgb(45, 115, 210)
+        }
+    } else if hovered {
+        egui::Color32::from_rgb(75, 95, 120)
+    } else {
+        egui::Color32::from_rgb(45, 55, 70)
+    };
+
+    let text_color = if active {
+        egui::Color32::WHITE
+    } else if hovered {
+        egui::Color32::from_rgb(200, 215, 235)
+    } else {
+        egui::Color32::from_rgb(130, 145, 165)
+    };
+
+    ui.painter().rect_filled(rect, 3, bg);
+    ui.painter().rect_stroke(rect, 3, egui::Stroke::new(1.0, stroke_color), egui::StrokeKind::Inside);
+
+    let icon_cx = rect.left() + padding_x + icon_w * 0.5 - 1.0;
+    let center_y = rect.center().y;
+
+    match indicator {
+        IndicatorShape::Dot(col) => {
+            let c = if active { col } else { egui::Color32::from_rgb(90, 105, 120) };
+            ui.painter().circle_filled(egui::pos2(icon_cx, center_y), 3.0, c);
+        }
+        IndicatorShape::DashedLine(col) => {
+            let c = if active { col } else { egui::Color32::from_rgb(90, 105, 120) };
+            ui.painter().line_segment(
+                [egui::pos2(icon_cx - 4.5, center_y), egui::pos2(icon_cx - 1.0, center_y)],
+                egui::Stroke::new(1.4, c),
+            );
+            ui.painter().line_segment(
+                [egui::pos2(icon_cx + 1.0, center_y), egui::pos2(icon_cx + 4.5, center_y)],
+                egui::Stroke::new(1.4, c),
+            );
+        }
+        IndicatorShape::Triangle(col) => {
+            let c = if active { col } else { egui::Color32::from_rgb(90, 105, 120) };
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(icon_cx - 3.5, center_y - 3.5),
+                    egui::pos2(icon_cx + 3.5, center_y - 3.5),
+                    egui::pos2(icon_cx, center_y + 3.5),
+                ],
+                c,
+                egui::Stroke::new(1.0, c),
+            ));
+        }
+        IndicatorShape::Box(col) => {
+            let c = if active { col } else { egui::Color32::from_rgb(90, 105, 120) };
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(egui::pos2(icon_cx, center_y), egui::vec2(6.5, 6.5)),
+                1,
+                c,
+            );
+        }
+        IndicatorShape::WireBox(col) => {
+            let c = if active { col } else { egui::Color32::from_rgb(90, 105, 120) };
+            ui.painter().rect_stroke(
+                egui::Rect::from_center_size(egui::pos2(icon_cx, center_y), egui::vec2(6.5, 6.5)),
+                1,
+                egui::Stroke::new(1.0, c),
+                egui::StrokeKind::Inside,
+            );
+        }
+        IndicatorShape::Grid(col) => {
+            let c = if active { col } else { egui::Color32::from_rgb(90, 105, 120) };
+            let gr = egui::Rect::from_center_size(egui::pos2(icon_cx, center_y), egui::vec2(7.0, 7.0));
+            ui.painter().rect_stroke(gr, 1, egui::Stroke::new(0.8, c), egui::StrokeKind::Inside);
+            ui.painter().line_segment(
+                [egui::pos2(gr.center().x, gr.top()), egui::pos2(gr.center().x, gr.bottom())],
+                egui::Stroke::new(0.8, c),
+            );
+            ui.painter().line_segment(
+                [egui::pos2(gr.left(), gr.center().y), egui::pos2(gr.right(), gr.center().y)],
+                egui::Stroke::new(0.8, c),
+            );
+        }
+    }
+
+    if !label.is_empty() {
+        let text_x = rect.left() + padding_x + icon_w;
+        ui.painter().text(
+            egui::pos2(text_x, center_y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font_id,
+            text_color,
+        );
+    }
+
+    if !tooltip.is_empty() {
+        response.on_hover_text(tooltip)
+    } else {
+        response
+    }
+}
+
+fn preset_pill(
+    ui: &mut egui::Ui,
+    label: &str,
+    tooltip: &str,
+    is_selected: bool,
+) -> egui::Response {
+    let font_id = egui::FontId::monospace(theme::font_size(8.5));
+    let padding_x = 6.0;
+    let row_height = 18.0;
+    let text_w = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), font_id.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    let total_w = text_w + padding_x * 2.0;
+
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(total_w, row_height), egui::Sense::click());
+    let hovered = response.hovered();
+
+    let bg = if is_selected {
+        if hovered {
+            egui::Color32::from_rgb(45, 125, 220)
+        } else {
+            egui::Color32::from_rgb(35, 95, 180)
+        }
+    } else if hovered {
+        egui::Color32::from_rgba_unmultiplied(40, 50, 68, 200)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(22, 28, 38, 170)
+    };
+
+    let stroke_col = if is_selected {
+        egui::Color32::from_rgb(70, 160, 255)
+    } else if hovered {
+        egui::Color32::from_rgb(70, 85, 105)
+    } else {
+        egui::Color32::from_rgb(45, 55, 70)
+    };
+
+    let text_col = if is_selected {
+        egui::Color32::WHITE
+    } else if hovered {
+        egui::Color32::from_rgb(220, 230, 245)
+    } else {
+        egui::Color32::from_rgb(140, 155, 175)
+    };
+
+    ui.painter().rect_filled(rect, 3, bg);
+    ui.painter().rect_stroke(rect, 3, egui::Stroke::new(1.0, stroke_col), egui::StrokeKind::Inside);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font_id,
+        text_col,
+    );
+
+    if !tooltip.is_empty() {
+        response.on_hover_text(tooltip)
+    } else {
+        response
+    }
+}
+
+/// Toolpath header bar: card title, interactive layer visibility toggles,
+/// quick view presets, and scale status.
+pub fn toolpath_header(app: &mut LincApp, ui: &mut Ui) -> egui::Rect {
     let top = ui.cursor().min;
     let right = ui.available_rect_before_wrap().right();
+    let avail_w = ui.available_width();
+    let is_compact = avail_w < 660.0;
+
     ui.horizontal(|ui| {
-        card_title(ui, "TOOLPATH");
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new("— CUT")
-                .monospace()
-                .size(theme::font_size(9.0))
-                .color(theme::ACCENT),
-        );
-        ui.label(
-            RichText::new("-- RAPID")
-                .monospace()
-                .size(theme::font_size(9.0))
-                .color(theme::MUTED),
-        );
-        ui.label(
-            RichText::new("— LIVE")
-                .monospace()
-                .size(theme::font_size(9.0))
-                .color(theme::SUCCESS),
-        );
-        let (marker, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-        // The same inverted triangle as the live tool marker, so the key reads
-        // as the tool rather than as another line style.
-        let tip = marker.center_bottom() - egui::vec2(0.0, 1.0);
-        ui.painter().add(egui::Shape::convex_polygon(
-            vec![
-                tip + egui::vec2(-4.0, -8.0),
-                tip + egui::vec2(4.0, -8.0),
-                tip,
+        ui.spacing_mut().item_spacing.x = 4.0;
+
+        // 1. Title
+        card_title(ui, linc_core::i18n::t("viewport.legend.toolpath"));
+
+        // Subtle vertical separator
+        let (sep_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 16.0), egui::Sense::hover());
+        ui.painter().line_segment(
+            [
+                egui::pos2(sep_rect.center().x, sep_rect.top() + 2.0),
+                egui::pos2(sep_rect.center().x, sep_rect.bottom() - 2.0),
             ],
-            linc_view::theme::TOOL,
-            egui::Stroke::new(1.0, linc_view::theme::TOOL),
-        ));
-        ui.label(
-            RichText::new("TOOL")
-                .monospace()
-                .size(theme::font_size(9.0))
-                .color(theme::FG),
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 55, 70)),
         );
-        // The REMAINING view has no trail and eats the path behind the tool, so
-        // the two keys above do not describe the card: say which mode is in force.
-        if remaining {
-            ui.add_space(8.0);
+
+        // 2. KESİM / CUT (Active indicator, info tooltip)
+        let cut_label = if is_compact { "" } else { linc_core::i18n::t("viewport.legend.cut") };
+        toggle_pill(
+            ui,
+            cut_label,
+            linc_core::i18n::t("viewport.legend.cut"),
+            true,
+            IndicatorShape::Dot(theme::ACCENT),
+        );
+
+        // 3. RAPID toggle
+        let rapid_label = if is_compact { "" } else { linc_core::i18n::t("viewport.legend.rapid") };
+        if toggle_pill(
+            ui,
+            rapid_label,
+            linc_core::i18n::t("viewport.toggles.rapids_tooltip"),
+            app.graph_style.show_rapids,
+            IndicatorShape::DashedLine(egui::Color32::from_rgb(180, 195, 215)),
+        )
+        .clicked()
+        {
+            app.graph_style.show_rapids = !app.graph_style.show_rapids;
+        }
+
+        // 4. CANLI / LIVE trail toggle
+        let live_label = if is_compact { "" } else { linc_core::i18n::t("viewport.legend.live") };
+        if toggle_pill(
+            ui,
+            live_label,
+            linc_core::i18n::t("viewport.legend.live"),
+            app.graph_style.show_live_trail,
+            IndicatorShape::Dot(theme::SUCCESS),
+        )
+        .clicked()
+        {
+            app.graph_style.show_live_trail = !app.graph_style.show_live_trail;
+        }
+
+        // 5. TAKIM / TOOL toggle
+        let tool_label = if is_compact { "" } else { linc_core::i18n::t("viewport.legend.tool") };
+        if toggle_pill(
+            ui,
+            tool_label,
+            linc_core::i18n::t("viewport.toggles.tool_tooltip"),
+            app.graph_style.show_tool,
+            IndicatorShape::Triangle(linc_view::theme::TOOL),
+        )
+        .clicked()
+        {
+            app.graph_style.show_tool = !app.graph_style.show_tool;
+        }
+
+        // 6. HAM / STOCK toggle
+        let stock_label = if is_compact { "" } else { linc_core::i18n::t("viewport.toggles.stock_short") };
+        if toggle_pill(
+            ui,
+            stock_label,
+            linc_core::i18n::t("viewport.toggles.stock_tooltip"),
+            app.graph_style.show_stock,
+            IndicatorShape::Box(egui::Color32::from_rgb(100, 160, 220)),
+        )
+        .clicked()
+        {
+            app.graph_style.show_stock = !app.graph_style.show_stock;
+        }
+
+        // 7. STROK / LIMITS toggle
+        let limits_label = if is_compact { "" } else { linc_core::i18n::t("viewport.toggles.limits_short") };
+        if toggle_pill(
+            ui,
+            limits_label,
+            linc_core::i18n::t("viewport.toggles.limits_tooltip"),
+            app.graph_style.bounds_mode != 3,
+            IndicatorShape::WireBox(egui::Color32::from_rgb(180, 130, 240)),
+        )
+        .clicked()
+        {
+            app.graph_style.bounds_mode = (app.graph_style.bounds_mode + 1) % 4;
+        }
+
+        // 8. DÜZLEM / PLANE toggle
+        let plane_label = if is_compact { "" } else { linc_core::i18n::t("viewport.toggles.plane_short") };
+        if toggle_pill(
+            ui,
+            plane_label,
+            linc_core::i18n::t("viewport.toggles.plane_tooltip"),
+            app.graph_style.show_workplane,
+            IndicatorShape::Grid(egui::Color32::from_rgb(120, 200, 200)),
+        )
+        .clicked()
+        {
+            app.graph_style.show_workplane = !app.graph_style.show_workplane;
+        }
+
+        // 9. REMAINING mode warning tag (satisfies test remaining_is_announced_in_the_toolpath_header)
+        if app.graph_style.remaining {
             ui.label(
-                RichText::new("REMAINING")
+                RichText::new(linc_core::i18n::t("viewport.legend.remaining"))
                     .monospace()
                     .size(theme::font_size(9.0))
                     .strong()
                     .color(linc_view::theme::TOOL),
             );
         }
+
+        // Subtle separator before View Presets
+        let (sep2_rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 16.0), egui::Sense::hover());
+        ui.painter().line_segment(
+            [
+                egui::pos2(sep2_rect.center().x, sep2_rect.top() + 2.0),
+                egui::pos2(sep2_rect.center().x, sep2_rect.bottom() - 2.0),
+            ],
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 55, 70)),
+        );
+
+        // 10. Preset View Group: [ İZO ] [ ÜST ] [ ÖN ] [ SAĞ ]
+        let current_view = if app.nav.page == Page::Manual {
+            app.manual.view
+        } else {
+            app.program.graph_view
+        };
+
+        let presets = [
+            (linc_core::i18n::t("viewport.snap.iso"), linc_core::i18n::t("viewport.presets.iso"), ViewMode::Iso3d, linc_view::DEFAULT_YAW, linc_view::DEFAULT_PITCH),
+            (linc_core::i18n::t("viewport.snap.top"), linc_core::i18n::t("viewport.presets.top"), ViewMode::TopXy, 0.0, 0.0),
+            (linc_core::i18n::t("viewport.snap.front"), linc_core::i18n::t("viewport.presets.front"), ViewMode::SideXz, 0.0, std::f32::consts::FRAC_PI_2),
+            (linc_core::i18n::t("viewport.snap.right"), linc_core::i18n::t("viewport.presets.right"), ViewMode::SideYz, -std::f32::consts::FRAC_PI_2, 0.0),
+        ];
+
+        for (label, tooltip, target_mode, target_yaw, target_pitch) in presets {
+            let is_sel = current_view == target_mode;
+            if preset_pill(ui, label, tooltip, is_sel).clicked() {
+                app.program.graph_view = target_mode;
+                app.program.graph_yaw = target_yaw;
+                app.program.graph_pitch = target_pitch;
+                app.program.fit_requested = true;
+                app.program.graph_auto_fit = true;
+
+                app.manual.view = target_mode;
+                app.manual.yaw = target_yaw;
+                app.manual.pitch = target_pitch;
+                app.manual.fit = true;
+                app.manual.auto_fit = true;
+            }
+        }
     });
+
     egui::Rect::from_min_max(top, egui::pos2(right, ui.cursor().min.y))
 }
 
@@ -1647,6 +1972,8 @@ pub struct DrawnTrajectory {
     pub response: egui::Response,
     /// Width of the card's viewport in model units, as drawn.
     pub span_mm: f32,
+    pub picked_line: Option<usize>,
+    pub view_mode: ViewMode,
 }
 
 pub fn trajectory(
@@ -1727,8 +2054,137 @@ pub fn trajectory(
     // so every card that draws a trail is correct in the frame it is drawn.
     view.live_trail_shift =
         crate::state::live_trail_shift(&app.snapshot, app.program.preview_offset.as_ref());
+    let tool_num = app.snapshot.tool_change.current_tool;
+    let current_row = app
+        .snapshot
+        .tool_table
+        .rows
+        .iter()
+        .find(|r| r.tool == tool_num);
+    view.tool_diameter = current_row
+        .and_then(|r| r.geometry.diameter)
+        .unwrap_or(6.0);
+    if app.profile.variant == MachineVariant::Lathe {
+        view.cutter_type = CutterType::Lathe;
+    } else if let Some(row) = current_row {
+        let desc = format!("{} {}", row.kind, row.description).to_ascii_lowercase();
+        if desc.contains("probe") {
+            view.cutter_type = CutterType::Probe;
+        } else if desc.contains("ball") {
+            view.cutter_type = CutterType::Ballend;
+        } else if desc.contains("chamfer") || desc.contains("v-bit") || desc.contains("vbit") || desc.contains("dovetail") {
+            view.cutter_type = CutterType::Chamfer;
+        } else if desc.contains("drill") {
+            view.cutter_type = CutterType::Drill;
+        } else if desc.contains("torus") || desc.contains("bullnose") || row.geometry.nose_radius.unwrap_or(0.0) > 0.0 {
+            view.cutter_type = CutterType::Torus {
+                corner_radius: row.geometry.nose_radius.unwrap_or(1.5),
+            };
+        } else {
+            view.cutter_type = CutterType::Endmill;
+        }
+    }
+    let a_rad = app
+        .snapshot
+        .positions
+        .axes
+        .get("A")
+        .or_else(|| app.snapshot.positions.axes.get("a"))
+        .map(|p| p.work.to_radians())
+        .unwrap_or(0.0);
+    let b_rad = app
+        .snapshot
+        .positions
+        .axes
+        .get("B")
+        .or_else(|| app.snapshot.positions.axes.get("b"))
+        .map(|p| p.work.to_radians())
+        .unwrap_or(0.0);
+    view.rotary_angles = [a_rad, b_rad];
     view.show_legend = view.show_legend && show_legend;
+
+    if height >= 100.0 {
+        let axes = app.axes();
+        let limits = &app.snapshot.machine.limits;
+        let mut hud_axes = Vec::new();
+        for axis in &axes {
+            if let Some((work, _machine, dtg)) = axis_display(app, axis) {
+                let homed = app
+                    .snapshot
+                    .machine
+                    .homed
+                    .get(axis)
+                    .copied()
+                    .unwrap_or(false);
+                let limit = limits.iter().any(|l| l.eq_ignore_ascii_case(axis));
+                hud_axes.push(HudAxis {
+                    letter: axis.clone(),
+                    work,
+                    dtg,
+                    homed,
+                    limit,
+                });
+            }
+        }
+        let wcs_name = displayed_wcs(app);
+        let active_wcs = app.snapshot.offsets.active_index.and_then(|idx| {
+            app.snapshot.offsets.offsets.iter().find(|o| o.index == idx)
+        });
+        let mut offsets = Vec::new();
+        for axis in &axes {
+            let g5x = active_wcs.and_then(|w| w.values.get(axis)).copied().unwrap_or(0.0);
+            let g92 = app.snapshot.offsets.g92.get(axis).copied().unwrap_or(0.0);
+            offsets.push(HudOffset {
+                letter: axis.clone(),
+                g5x,
+                g92,
+                tlo: 0.0,
+            });
+        }
+        let rot_xy = active_wcs.and_then(|w| w.rotation).unwrap_or(0.0);
+        let velocity = app
+            .snapshot
+            .positions
+            .axes
+            .values()
+            .iter()
+            .map(|p| p.velocity)
+            .fold(0.0f64, f64::max);
+        let feed_cmd = app.snapshot.feed.feed * app.snapshot.feed.feed_override;
+        let (cut_dist_mm, rapid_dist_mm, est_time_secs) = if !preview.segments.is_empty() {
+            let cut = preview.cut_distance();
+            let rapid = preview.rapid_distance();
+            let feed_mmpm = if feed_cmd > 1.0 { feed_cmd } else { 1200.0 };
+            let rapid_mmpm = 5000.0;
+            let est = preview.estimated_time_secs(feed_mmpm, rapid_mmpm);
+            (Some(cut), Some(rapid), Some(est))
+        } else {
+            (None, None, None)
+        };
+        let blend_info = app.program.preview.blend_mode.as_ref().map(|mode| {
+            if let Some(tol) = app.program.preview.blend_tolerance {
+                format!("{mode} P{tol:.3}")
+            } else {
+                mode.clone()
+            }
+        });
+        view.hud = Some(HudOverlay {
+            enabled: true,
+            axes: hud_axes,
+            wcs_name,
+            offsets,
+            rot_xy,
+            velocity,
+            feed_cmd,
+            est_time_secs,
+            cut_dist_mm,
+            rapid_dist_mm,
+            blend_info,
+        });
+    }
+
     let response = draw_trajectory(ui, &mut view);
+    let picked_line = view.picked_line;
     // A click on the card hands it the keyboard. The shell's pan chords are
     // hover-scoped *and* behind "no text field is focused" — Ctrl+Left/Right is
     // the G-code editor's word move, Ctrl+Up/Down its line move — and the panel
@@ -1751,6 +2207,8 @@ pub fn trajectory(
     DrawnTrajectory {
         response,
         span_mm: view.span_mm,
+        picked_line,
+        view_mode: view.view,
     }
 }
 
@@ -2127,7 +2585,7 @@ pub fn live_graph_card(app: &mut LincApp, ui: &mut Ui, card_height: f32) {
     );
     shell_card(ui, rect, |ui| {
         let body_top = ui.cursor().top();
-        let header = toolpath_header(ui, app.graph_style.remaining);
+        let header = toolpath_header(app, ui);
         let header_height = ui.cursor().top() - body_top;
         let graph_height = (rect.height() - 8.0 - header_height - 2.0).max(60.0);
         let preview = app.program.last_valid_preview.clone();

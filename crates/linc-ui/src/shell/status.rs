@@ -262,6 +262,26 @@ impl LincApp {
         self.profile.is_sim() || self.snapshot.simulated
     }
 
+    /// Whether the embedded operator simulation panel should be drawn.
+    ///
+    /// By default, it is shown only on operationally relevant pages (Machine, Manual, Homing, Offsets, Probe)
+    /// and hidden on editing/configuration pages (Program, Tools, Files, Diagnostics, Help),
+    /// unless the operator explicitly toggled it open or closed via the top bar.
+    pub fn sim_panel_should_show(&self) -> bool {
+        if self.profile.config.machine.kind != "sim" || !self.embedded_panel_visible {
+            return false;
+        }
+        let is_operational = matches!(
+            self.nav.page,
+            crate::state::Page::Machine
+                | crate::state::Page::Manual
+                | crate::state::Page::Homing
+                | crate::state::Page::Offsets
+                | crate::state::Page::Probe
+        );
+        is_operational || self.sim_panel_force_show
+    }
+
     pub fn active_offset(&self) -> Option<&linc_core::model::AxisMap<f64>> {
         active_offset(&self.snapshot)
     }

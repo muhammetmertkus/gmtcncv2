@@ -9,10 +9,11 @@ pub(crate) mod hershey;
 pub mod travel;
 
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke,
+    pos2, Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke,
     StrokeKind, Ui, Vec2,
 };
 use linc_core::gcode::{ArcSpec, Bounds3, PathSegment, Plane, Preview, SegmentKind};
+use linc_core::i18n::t;
 use linc_core::model::{MachineVariant, TrailPoint};
 
 pub mod theme {
@@ -91,6 +92,53 @@ pub fn cycle_view(mode: ViewMode, variant: MachineVariant) -> ViewMode {
 /// isometric reading of a mill table.
 pub const DEFAULT_YAW: f32 = std::f32::consts::FRAC_PI_4;
 pub const DEFAULT_PITCH: f32 = 0.615;
+
+/// Axis position line in the HUD overlay.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HudAxis {
+    pub letter: String,
+    pub work: f64,
+    pub dtg: f64,
+    pub homed: bool,
+    pub limit: bool,
+}
+
+/// Offset line (WCS / G92 / TLO) in the HUD overlay.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HudOffset {
+    pub letter: String,
+    pub g5x: f64,
+    pub g92: f64,
+    pub tlo: f64,
+}
+
+/// LinuxCNC AXIS style Heads-Up Display (HUD) overlay for the 3D viewport.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HudOverlay {
+    pub enabled: bool,
+    pub axes: Vec<HudAxis>,
+    pub wcs_name: String,
+    pub offsets: Vec<HudOffset>,
+    pub rot_xy: f64,
+    pub velocity: f64,
+    pub feed_cmd: f64,
+    pub est_time_secs: Option<f64>,
+    pub cut_dist_mm: Option<f64>,
+    pub rapid_dist_mm: Option<f64>,
+    pub blend_info: Option<String>,
+}
+
+/// Profile geometry of the active cutter for 3D spindle visualization.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CutterType {
+    Endmill,
+    Ballend,
+    Chamfer,
+    Drill,
+    Probe,
+    Torus { corner_radius: f64 },
+    Lathe,
+}
 
 #[derive(Clone, Debug)]
 pub struct TrajectoryView<'a> {
@@ -200,6 +248,28 @@ pub struct TrajectoryView<'a> {
     /// yet (first frame, resize) that pan puts the part outside the real card.
     pub auto_fit: bool,
     pub axis_labels: Vec<String>,
+    /// LinuxCNC AXIS style HUD overlay showing live DRO, DTG, G54/G92 offsets, TLO and velocity.
+    pub hud: Option<HudOverlay>,
+    /// Line picked by clicking on the 3D toolpath viewport.
+    pub picked_line: Option<usize>,
+    /// Tool cutter diameter in mm (default: 6.0).
+    pub tool_diameter: f64,
+    /// Rotary axis angles [A, B] in radians for multi-axis spindle orientation.
+    pub rotary_angles: [f64; 2],
+    /// Whether to draw 3D rotary calibration rings when rotary axes exist.
+    pub show_rotary_rings: bool,
+    /// Cutter profile geometry for 3D tool modeling (Endmill, Ballend, Chamfer, Drill, Probe, etc.).
+    pub cutter_type: CutterType,
+    /// Interactive 3D ViewCube (orientation cube) in the top-right corner.
+    pub show_view_cube: bool,
+    /// Whether to draw rapid traverse (G0) dashed lines (AXIS parity).
+    pub show_rapids: bool,
+    /// Whether to draw the 3D tool spindle head / cutter (AXIS parity).
+    pub show_tool: bool,
+    /// Whether to draw the active working plane grid (G17/G18/G19) (AXIS parity).
+    pub show_workplane: bool,
+    /// Whether to draw the quick visibility toggle pills below ViewCube (AXIS parity).
+    pub show_toggles: bool,
 }
 
 impl<'a> TrajectoryView<'a> {
@@ -254,6 +324,21 @@ impl<'a> TrajectoryView<'a> {
             fit: false,
             auto_fit: false,
             axis_labels: vec!["X".into(), "Y".into(), "Z".into()],
+            hud: None,
+            picked_line: None,
+            tool_diameter: 6.0,
+            rotary_angles: [0.0, 0.0],
+            show_rotary_rings: true,
+            cutter_type: if variant == MachineVariant::Lathe {
+                CutterType::Lathe
+            } else {
+                CutterType::Endmill
+            },
+            show_view_cube: true,
+            show_rapids: true,
+            show_tool: true,
+            show_workplane: true,
+            show_toggles: true,
         }
     }
 
@@ -701,6 +786,11 @@ fn fit_zoom_pan(
 /// the opposite: everything drawn, so an offset far from the part still shows.
 fn fit_target(view: &TrajectoryView<'_>, reference: Bounds3) -> Bounds3 {
     let mut target = view.preview.bounds.unwrap_or(reference);
+    if let Some(stock) = &view.preview.workpiece {
+        let b = stock.bounds();
+        target.include(b.min);
+        target.include(b.max);
+    }
     if view.fit_tool {
         if let Some(tip) = view.fit_tool_tip.or(view.tool_tip) {
             target.include(view.trail_point(tip));
@@ -1194,22 +1284,94 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
             view.auto_fit = false;
         }
     }
-    // Blender-style navigation: the middle button orbits, Shift+middle pans, and
-    // the wheel zooms. The primary button still pans, which is what a touch
-    // screen and a left-handed operator have. A pinch on the touch screen is
-    // the wheel's replacement and is handled above.
+    // 3D Navigation (Trackball Orbit, Pan, Zoom, Reset, Inertial AutoSpin):
+    let spin_id = ui.scope_id().with("toolpath-autospin-vel");
+    let mut spin_vel: Vec2 = ui.ctx().data(|d| d.get_temp(spin_id)).unwrap_or(Vec2::ZERO);
+
+    // Orbit pivot centered on selected line if active
+    let pivot: Option<[f64; 3]> = view.selected_line.and_then(|ln| {
+        view.preview.segments.iter().find(|s| s.line == ln).map(|s| {
+            [
+                (s.start[0] + s.end[0]) * 0.5,
+                (s.start[1] + s.end[1]) * 0.5,
+                (s.start[2] + s.end[2]) * 0.5,
+            ]
+        })
+    });
+
+    let apply_orbit = |dyaw: f32, dpitch: f32, view: &mut TrajectoryView| {
+        view.view = ViewMode::Iso3d;
+        let drawn = rect.shrink(12.0);
+        if let Some(pivot_pt) = pivot {
+            let p_before = Projection::new(
+                reference, drawn, view.view, view.yaw, view.pitch, view.zoom, view.pan,
+            )
+            .mirrored(view.mirror_x)
+            .project(pivot_pt);
+
+            view.yaw += dyaw;
+            view.pitch = (view.pitch + dpitch).clamp(-1.50, 1.50);
+
+            let p_after = Projection::new(
+                reference, drawn, view.view, view.yaw, view.pitch, view.zoom, view.pan,
+            )
+            .mirrored(view.mirror_x)
+            .project(pivot_pt);
+
+            view.pan += p_before - p_after;
+        } else {
+            view.yaw += dyaw;
+            view.pitch = (view.pitch + dpitch).clamp(-1.50, 1.50);
+        }
+    };
+
+    if response.dragged_by(egui::PointerButton::Primary) {
+        let delta = response.drag_delta();
+        let shift = ui.input(|input| input.modifiers.shift || input.modifiers.ctrl);
+        view.auto_fit = false;
+        if shift {
+            view.pan += delta;
+            spin_vel = Vec2::ZERO;
+        } else if delta.length_sq() > 0.0 {
+            spin_vel = delta;
+            apply_orbit(delta.x * 0.008, -delta.y * 0.008, view);
+        }
+    }
+    if response.dragged_by(egui::PointerButton::Secondary) {
+        view.pan += response.drag_delta();
+        view.auto_fit = false;
+        spin_vel = Vec2::ZERO;
+    }
     if response.dragged_by(egui::PointerButton::Middle) {
         let delta = response.drag_delta();
         let shift = ui.input(|input| input.modifiers.shift);
         view.auto_fit = false;
-        if shift || view.view != ViewMode::Iso3d {
+        if shift {
             view.pan += delta;
+            spin_vel = Vec2::ZERO;
         } else {
-            view.yaw += delta.x * 0.01;
-            // Drag up to look from above, drag down to look from below.
-            view.pitch = (view.pitch - delta.y * 0.01).clamp(-1.48, 1.48);
+            spin_vel = delta;
+            apply_orbit(delta.x * 0.008, -delta.y * 0.008, view);
         }
     }
+    if response.drag_stopped() {
+        if spin_vel.length() < 1.0 {
+            spin_vel = Vec2::ZERO;
+        }
+    }
+    if response.clicked() {
+        spin_vel = Vec2::ZERO;
+    }
+    if !response.dragged() && spin_vel.length_sq() > 0.002 {
+        apply_orbit(spin_vel.x * 0.004, -spin_vel.y * 0.004, view);
+        spin_vel *= 0.94;
+        if spin_vel.length_sq() < 0.002 {
+            spin_vel = Vec2::ZERO;
+        }
+        ui.ctx().request_repaint();
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(spin_id, spin_vel));
+
     if response.double_clicked() {
         // Back to the default isometric view.
         view.yaw = DEFAULT_YAW;
@@ -1218,10 +1380,7 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
         view.pan = Vec2::ZERO;
         view.fit = true;
         view.auto_fit = true;
-    }
-    if response.dragged_by(egui::PointerButton::Primary) {
-        view.pan += response.drag_delta();
-        view.auto_fit = false;
+        ui.ctx().data_mut(|d| d.insert_temp(spin_id, Vec2::ZERO));
     }
 
     // A tool-inclusive fit frames the head the fit was asked for, not the one
@@ -1350,9 +1509,86 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
     view.zoom = projection.zoom;
     view.span_mm = projection.span(rect.width());
 
+    // 3D Toolpath Segment Hit-Testing (Pick-to-Code Navigation):
+    // When the operator clicks on the 3D card without dragging, find the closest path segment
+    // within 14px and select that G-code line.
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos().or_else(|| ui.input(|i| i.pointer.latest_pos())) {
+            let in_cube = if view.show_view_cube {
+                let cube_rect = Rect::from_min_size(
+                    rect.right_top() + Vec2::new(-95.0, 8.0),
+                    Vec2::new(88.0, 120.0),
+                );
+                cube_rect.contains(pos)
+            } else {
+                false
+            };
+            if !in_cube {
+                let mut best_line = None;
+                let mut best_dist_sq = 14.0f32 * 14.0f32;
+                for segment in &view.preview.segments {
+                    if view.eaten(segment.line) {
+                        continue;
+                    }
+                    if let Some(arc) = &segment.arc {
+                        let pts = arc_points(segment, arc);
+                        for pair in pts.windows(2) {
+                            let p0 = projection.project(pair[0]);
+                            let p1 = projection.project(pair[1]);
+                            let d2 = dist_sq_point_to_line_segment(pos, p0, p1);
+                            if d2 < best_dist_sq {
+                                best_dist_sq = d2;
+                                best_line = Some(segment.line);
+                            }
+                        }
+                    } else {
+                        let p0 = projection.project(segment.start);
+                        let p1 = projection.project(segment.end);
+                        let d2 = dist_sq_point_to_line_segment(pos, p0, p1);
+                        if d2 < best_dist_sq {
+                            best_dist_sq = d2;
+                            best_line = Some(segment.line);
+                        }
+                    }
+                }
+                if let Some(line) = best_line {
+                    view.selected_line = Some(line);
+                    view.picked_line = Some(line);
+                }
+            }
+        }
+    }
+
     // Grid and axis labels.
     if view.show_grid {
         draw_grid(&painter, &projection, reference);
+    }
+    // Rotary calibration rings (when 4th/5th rotary axes exist)
+    if view.show_rotary_rings {
+        draw_rotary_rings(
+            &painter,
+            &projection,
+            view.origin,
+            &view.axis_labels,
+            view.rotary_angles,
+        );
+    }
+    // Active workplane (G17/G18/G19) subtle grid indicator (LinuxCNC AXIS WorkPlanePart parity)
+    if view.show_workplane {
+        let plane = if !view.preview.modal.plane.is_empty() {
+            view.preview.modal.plane.as_str()
+        } else {
+            "G17"
+        };
+        let max_dim = view.preview.bounds.map(|b| {
+            let s = b.size();
+            s[0].max(s[1]).max(s[2])
+        }).unwrap_or(60.0);
+        let half_size = (max_dim * 0.45).clamp(15.0, 150.0);
+        let center = view.tool_tip.unwrap_or(view.origin);
+        let wp_fill = Color32::from_rgba_unmultiplied(60, 160, 230, 16);
+        let wp_edge = Color32::from_rgba_unmultiplied(70, 180, 245, 80);
+        draw_workplane_grid(&painter, &projection, plane, center, half_size, wp_fill, wp_edge);
     }
     // The machine origin is context for the offset: a muted triad with a green
     // line to the active work origin, so the distance the table is editing is
@@ -1366,10 +1602,29 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
             [0.0; 3],
             theme::MUTED,
         );
+        let from_pos = projection.project([0.0; 3]);
+        let to_pos = projection.project(view.origin);
         draw_origin_arrow(
             &painter,
-            projection.project([0.0; 3]),
-            projection.project(view.origin),
+            from_pos,
+            to_pos,
+            theme::SUCCESS,
+        );
+        // Label the tether vector with the active WCS (e.g. G54)
+        let mid_pos = Pos2::new(
+            (from_pos.x + to_pos.x) * 0.5,
+            (from_pos.y + to_pos.y) * 0.5 - 9.0,
+        );
+        let label = if !view.preview.modal.wcs.is_empty() {
+            &view.preview.modal.wcs
+        } else {
+            "G54"
+        };
+        painter.text(
+            mid_pos,
+            Align2::CENTER_CENTER,
+            label,
+            FontId::monospace(10.0 * FONT_SCALE),
             theme::SUCCESS,
         );
     }
@@ -1434,22 +1689,41 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
     }
 
     // Stock envelope: the block the program cuts out of. Derived from the
-    // program extents so it tracks the loaded program, and drawn translucent
-    // so it never hides the toolpath.
+    // workpiece declaration or program extents, drawn translucent so it never hides the toolpath.
     let mut stock_drawn = false;
-    if view.show_stock && view.stock_alpha > 0 && has_data {
-        if let Some(bounds) = view.preview.bounds.as_ref().and_then(stock_bounds) {
+    if view.show_stock {
+        if let Some(wp) = &view.preview.workpiece {
             stock_drawn = true;
-            // The fill is configurable and defaults to fully transparent: the
-            // block used to wash out the part it was supposed to help place.
-            let fill = Color32::from_rgba_premultiplied(
-                theme::STOCK_FILL.r(),
-                theme::STOCK_FILL.g(),
-                theme::STOCK_FILL.b(),
-                view.stock_alpha,
-            );
-            draw_bounds_filled(&painter, &projection, bounds, fill);
-            draw_bounds(&painter, &projection, bounds, theme::STOCK_EDGE, 1.0);
+            let alpha = if view.stock_alpha > 0 { view.stock_alpha } else { 38 };
+            let fill = Color32::from_rgba_unmultiplied(70, 85, 105, alpha);
+            let edge = theme::STOCK_EDGE;
+            match wp {
+                linc_core::gcode::WorkpieceStock::Box { min, max } => {
+                    let b = Bounds3 { min: *min, max: *max };
+                    draw_bounds_filled(&painter, &projection, b, fill);
+                    draw_bounds(&painter, &projection, b, edge, 1.2);
+                }
+                linc_core::gcode::WorkpieceStock::Cylinder { center, radius, height } => {
+                    draw_cylinder_stock(&painter, &projection, *center, *radius, *height, fill, edge);
+                }
+                linc_core::gcode::WorkpieceStock::Tube { center, outer_radius, inner_radius, height } => {
+                    draw_tube_stock(&painter, &projection, *center, *outer_radius, *inner_radius, *height, fill, edge);
+                }
+            }
+        } else if view.stock_alpha > 0 && has_data {
+            if let Some(bounds) = view.preview.bounds.as_ref().and_then(stock_bounds) {
+                stock_drawn = true;
+                // The fill is configurable and defaults to fully transparent: the
+                // block used to wash out the part it was supposed to help place.
+                let fill = Color32::from_rgba_premultiplied(
+                    theme::STOCK_FILL.r(),
+                    theme::STOCK_FILL.g(),
+                    theme::STOCK_FILL.b(),
+                    view.stock_alpha,
+                );
+                draw_bounds_filled(&painter, &projection, bounds, fill);
+                draw_bounds(&painter, &projection, bounds, theme::STOCK_EDGE, 1.0);
+            }
         }
     }
 
@@ -1467,6 +1741,9 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
                 continue;
             }
             let is_selected = view.show_selected_line && view.selected_line == Some(segment.line);
+            if !view.show_rapids && segment.kind == SegmentKind::Rapid && !is_selected {
+                continue;
+            }
             let stroke = if is_selected {
                 Stroke::new(2.6, view.selected_line_color)
             } else if segment.kind == SegmentKind::Rapid {
@@ -1553,6 +1830,7 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
                 program,
                 view.work_offset,
                 view.variant,
+                view.machine_bounds,
             );
         }
     }
@@ -1586,29 +1864,24 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
             }
         }
     }
-    // Live tool position. Amber, matching the accepted mockup, so the toolhead
-    // is distinguishable from the green live trail it sits on.
-    if let Some(tip) = view
-        .tool_tip
-        .or_else(|| view.live_trail.last().map(|point| point.position))
-        .map(|tip| view.trail_point(tip))
-    {
-        let pos = projection.project(tip);
-        // An inverted triangle whose point sits exactly on the tool position:
-        // the tip is the datum, so the shape has to end there rather than be
-        // centred on it. A circle plus crosshair left the tip ambiguous at this
-        // size.
-        const HALF_WIDTH: f32 = 7.0;
-        const HEIGHT: f32 = 12.0;
-        painter.add(egui::Shape::convex_polygon(
-            vec![
-                pos + Vec2::new(-HALF_WIDTH, -HEIGHT),
-                pos + Vec2::new(HALF_WIDTH, -HEIGHT),
-                pos,
-            ],
-            theme::TOOL,
-            Stroke::new(1.0, theme::TOOL),
-        ));
+    // Live volumetric 3D tool position and spindle orientation.
+    if view.show_tool {
+        if let Some(tip) = view
+            .tool_tip
+            .or_else(|| view.live_trail.last().map(|point| point.position))
+            .map(|tip| view.trail_point(tip))
+        {
+            draw_3d_tool(
+                &painter,
+                &projection,
+                tip,
+                view.tool_diameter,
+                view.rotary_angles,
+                view.variant == MachineVariant::Lathe,
+                view.cutter_type,
+                view.preview.bounds,
+            );
+        }
     }
 
     // Execution marker at the current line end.
@@ -1619,12 +1892,70 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
         }
     }
 
+    // Dwell (G4) pause markers: draw salmon crosses and dwell duration badges
+    if has_data && !view.preview.dwells.is_empty() {
+        let dwell_color = Color32::from_rgb(255, 128, 128); // AXIS salmon cross
+        for dwell in &view.preview.dwells {
+            if view.eaten(dwell.line) {
+                continue;
+            }
+            let pos = projection.project(dwell.point);
+            let arm = 6.0;
+            painter.line_segment(
+                [pos - Vec2::new(arm, arm), pos + Vec2::new(arm, arm)],
+                Stroke::new(1.8, dwell_color),
+            );
+            painter.line_segment(
+                [pos - Vec2::new(arm, -arm), pos + Vec2::new(arm, -arm)],
+                Stroke::new(1.8, dwell_color),
+            );
+            let label = if dwell.seconds > 0.0 {
+                format!("G4 {:.1}s", dwell.seconds)
+            } else {
+                "G4".to_string()
+            };
+            painter.text(
+                pos + Vec2::new(8.0, -8.0),
+                Align2::LEFT_BOTTOM,
+                label,
+                FontId::monospace(9.5 * FONT_SCALE),
+                dwell_color,
+            );
+        }
+    }
+
+    let hud_active = view.hud.as_ref().map_or(false, |h| h.enabled && !h.axes.is_empty());
+    if let Some(hud) = &view.hud {
+        draw_hud(&painter, rect, hud);
+    }
+
+    if view.show_view_cube && (view.view == ViewMode::Iso3d || view.view == ViewMode::TopXy || view.view == ViewMode::SideXz || view.view == ViewMode::SideYz) {
+        if draw_view_cube(
+            &painter,
+            rect,
+            &mut view.yaw,
+            &mut view.pitch,
+            &mut view.view,
+            ui,
+        ) {
+            view.fit = true;
+            view.auto_fit = true;
+        }
+    }
+
     if view.show_legend {
-        // Legend.
-        let legend_rect = Rect::from_min_size(
-            rect.left_top() + Vec2::new(12.0, 12.0),
-            Vec2::new(214.0, 90.0),
-        );
+        // Legend. When HUD is active, place legend on the top-right to prevent overlap.
+        let legend_rect = if hud_active {
+            Rect::from_min_size(
+                rect.right_top() + Vec2::new(-226.0, 12.0),
+                Vec2::new(214.0, 90.0),
+            )
+        } else {
+            Rect::from_min_size(
+                rect.left_top() + Vec2::new(12.0, 12.0),
+                Vec2::new(214.0, 90.0),
+            )
+        };
         painter.rect_filled(
             legend_rect,
             CornerRadius::same(4),
@@ -1722,7 +2053,7 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
             Align2::LEFT_TOP,
             if view.view == ViewMode::Iso3d {
                 format!(
-                    "{}  •  {}  •  MMB ORBIT",
+                    "{}  •  {}  •  DRAG TO ORBIT",
                     view.view.label(),
                     span_label_mm(view.span_mm)
                 )
@@ -1738,23 +2069,754 @@ pub fn draw_trajectory(ui: &mut Ui, view: &mut TrajectoryView<'_>) -> Response {
         painter.text(
             rect.center(),
             Align2::CENTER_CENTER,
-            "NO PROGRAM LOADED",
+            t("viewport.status.no_program"),
             FontId::monospace(14.0 * FONT_SCALE),
             theme::MUTED,
         );
     }
 
-    draw_axis_triad(
-        &painter,
-        rect,
-        view.view,
-        view.yaw,
-        view.pitch,
-        view.mirror_x,
-        &view.axis_labels,
-    );
+    if !view.show_view_cube {
+        draw_axis_triad(
+            &painter,
+            rect,
+            view.view,
+            view.yaw,
+            view.pitch,
+            view.mirror_x,
+            &view.axis_labels,
+        );
+    }
 
     response
+}
+
+fn dist_sq_point_to_line_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let ap = p - a;
+    let len_sq = ab.length_sq();
+    if len_sq <= 1e-6 {
+        return ap.length_sq();
+    }
+    let t = (ap.dot(ab) / len_sq).clamp(0.0, 1.0);
+    let proj = a + ab * t;
+    (p - proj).length_sq()
+}
+
+fn draw_3d_tool(
+    painter: &Painter,
+    projection: &Projection,
+    tip: [f64; 3],
+    tool_diameter: f64,
+    rotary_angles: [f64; 2],
+    is_lathe: bool,
+    cutter_type: CutterType,
+    bounds: Option<Bounds3>,
+) {
+    let max_part_dim = bounds
+        .map(|b| {
+            let s = b.size();
+            s[0].max(s[1]).max(s[2])
+        })
+        .unwrap_or(80.0);
+    // Adaptively scale spindle collar & holder on small parts so it never dominates the workpiece
+    let part_scale = (max_part_dim / 130.0).clamp(0.35, 1.0);
+
+    if is_lathe || cutter_type == CutterType::Lathe {
+        let p_tip = projection.project(tip);
+        let shank_w = (14.0 * part_scale).clamp(6.0, 15.0) as f32;
+        let shank_len = (28.0 * part_scale).clamp(12.0, 30.0) as f32;
+        let shank_poly = vec![
+            p_tip + Vec2::new(5.0 * part_scale as f32, 3.0 * part_scale as f32),
+            p_tip + Vec2::new((5.0 + shank_len) * part_scale as f32, 3.0 * part_scale as f32),
+            p_tip + Vec2::new((5.0 + shank_len) * part_scale as f32, (3.0 + shank_w) * part_scale as f32),
+            p_tip + Vec2::new(5.0 * part_scale as f32, (3.0 + shank_w) * part_scale as f32),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            shank_poly,
+            Color32::from_rgb(0x45, 0x4d, 0x58),
+            Stroke::new(1.0, Color32::from_rgb(0x28, 0x2e, 0x36)),
+        ));
+        let insert_poly = vec![
+            p_tip,
+            p_tip + Vec2::new(6.0 * part_scale as f32, -2.5 * part_scale as f32),
+            p_tip + Vec2::new(10.0 * part_scale as f32, 3.5 * part_scale as f32),
+            p_tip + Vec2::new(4.0 * part_scale as f32, 6.0 * part_scale as f32),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            insert_poly,
+            Color32::from_rgb(0xf5, 0xb8, 0x2e),
+            Stroke::new(1.0, Color32::from_rgb(0xc0, 0x88, 0x18)),
+        ));
+        painter.circle_filled(p_tip, 2.0, Color32::WHITE);
+        return;
+    }
+
+    let r_tool = (tool_diameter * 0.5).clamp(0.8, 25.0);
+    let a_rad = rotary_angles[0];
+    let b_rad = rotary_angles[1];
+
+    let sin_a = a_rad.sin();
+    let cos_a = a_rad.cos();
+    let sin_b = b_rad.sin();
+    let cos_b = b_rad.cos();
+    let u = [sin_b, -sin_a * cos_b, cos_a * cos_b];
+
+    let v1 = [cos_b, 0.0, -sin_b];
+    let v2 = [
+        u[1] * v1[2] - u[2] * v1[1],
+        u[2] * v1[0] - u[0] * v1[2],
+        u[0] * v1[1] - u[1] * v1[0],
+    ];
+
+    let light = [0.45f64, -0.35, 0.82];
+    let light_len = (light[0] * light[0] + light[1] * light[1] + light[2] * light[2]).sqrt();
+    let l_dir = [light[0] / light_len, light[1] / light_len, light[2] / light_len];
+
+    let circle_pt = |h: f64, r: f64, angle: f64| -> [f64; 3] {
+        let (sin_t, cos_t) = angle.sin_cos();
+        let radial = [
+            v1[0] * cos_t + v2[0] * sin_t,
+            v1[1] * cos_t + v2[1] * sin_t,
+            v1[2] * cos_t + v2[2] * sin_t,
+        ];
+        [
+            tip[0] + u[0] * h + radial[0] * r,
+            tip[1] + u[1] * h + radial[1] * r,
+            tip[2] + u[2] * h + radial[2] * r,
+        ]
+    };
+
+    const SEGMENTS: usize = 12;
+    use std::f64::consts::TAU;
+
+    // Adaptive height scaling
+    let flute_len = (r_tool * 3.5 * part_scale).clamp(5.0, 24.0);
+
+    // 1. Tool Flutes / Probe Tip Geometry
+    match cutter_type {
+        CutterType::Probe => {
+            // Stainless steel stylus rod
+            let rod_r = (1.0 * part_scale).clamp(0.5, 1.6);
+            for i in 0..SEGMENTS {
+                let t0 = (i as f64 / SEGMENTS as f64) * TAU;
+                let t1 = ((i + 1) as f64 / SEGMENTS as f64) * TAU;
+                let mid_t = (t0 + t1) * 0.5;
+                let norm = [
+                    v1[0] * mid_t.cos() + v2[0] * mid_t.sin(),
+                    v1[1] * mid_t.cos() + v2[1] * mid_t.sin(),
+                    v1[2] * mid_t.cos() + v2[2] * mid_t.sin(),
+                ];
+                let diff = (norm[0] * l_dir[0] + norm[1] * l_dir[1] + norm[2] * l_dir[2]).max(0.0);
+                let shade = (0.50 + 0.50 * diff) as f32;
+                let rod_color = Color32::from_rgb(
+                    (190.0 * shade) as u8,
+                    (200.0 * shade) as u8,
+                    (210.0 * shade) as u8,
+                );
+                let p0 = projection.project(circle_pt(0.0, rod_r, t0));
+                let p1 = projection.project(circle_pt(0.0, rod_r, t1));
+                let p2 = projection.project(circle_pt(flute_len, rod_r, t1));
+                let p3 = projection.project(circle_pt(flute_len, rod_r, t0));
+                painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2, p3], rod_color, Stroke::NONE));
+            }
+            // Ruby red sphere at the probe contact tip
+            let p_tip = projection.project(tip);
+            let ruby_r = (3.5 * part_scale).clamp(2.5, 5.5) as f32;
+            painter.circle_filled(p_tip, ruby_r, Color32::from_rgb(235, 30, 65));
+            painter.circle_filled(p_tip + Vec2::new(-ruby_r * 0.28, -ruby_r * 0.28), ruby_r * 0.35, Color32::WHITE);
+        }
+        CutterType::Ballend => {
+            // Ball radius is r_tool; hemispherical tip
+            let ball_h = r_tool.min(flute_len * 0.5);
+            for i in 0..SEGMENTS {
+                let t0 = (i as f64 / SEGMENTS as f64) * TAU;
+                let t1 = ((i + 1) as f64 / SEGMENTS as f64) * TAU;
+                let mid_t = (t0 + t1) * 0.5;
+                let norm = [
+                    v1[0] * mid_t.cos() + v2[0] * mid_t.sin(),
+                    v1[1] * mid_t.cos() + v2[1] * mid_t.sin(),
+                    v1[2] * mid_t.cos() + v2[2] * mid_t.sin(),
+                ];
+                let diff = (norm[0] * l_dir[0] + norm[1] * l_dir[1] + norm[2] * l_dir[2]).max(0.0);
+                let shade = (0.50 + 0.50 * diff) as f32;
+                let flute_color = Color32::from_rgb((250.0 * shade) as u8, (185.0 * shade) as u8, (40.0 * shade) as u8);
+
+                let p_tip_pt = projection.project(tip);
+                let p1 = projection.project(circle_pt(ball_h, r_tool, t0));
+                let p2 = projection.project(circle_pt(ball_h, r_tool, t1));
+                painter.add(egui::Shape::convex_polygon(vec![p_tip_pt, p1, p2], flute_color, Stroke::NONE));
+
+                let p3 = projection.project(circle_pt(flute_len, r_tool, t1));
+                let p4 = projection.project(circle_pt(flute_len, r_tool, t0));
+                painter.add(egui::Shape::convex_polygon(vec![p1, p2, p3, p4], flute_color, Stroke::NONE));
+            }
+            let tip_screen = projection.project(tip);
+            painter.circle_filled(tip_screen, 2.5, theme::TOOL);
+        }
+        CutterType::Drill | CutterType::Chamfer => {
+            // Conical tip tapering to apex
+            let cone_h = (r_tool * 1.0).min(flute_len * 0.5);
+            for i in 0..SEGMENTS {
+                let t0 = (i as f64 / SEGMENTS as f64) * TAU;
+                let t1 = ((i + 1) as f64 / SEGMENTS as f64) * TAU;
+                let mid_t = (t0 + t1) * 0.5;
+                let norm = [
+                    v1[0] * mid_t.cos() + v2[0] * mid_t.sin(),
+                    v1[1] * mid_t.cos() + v2[1] * mid_t.sin(),
+                    v1[2] * mid_t.cos() + v2[2] * mid_t.sin(),
+                ];
+                let diff = (norm[0] * l_dir[0] + norm[1] * l_dir[1] + norm[2] * l_dir[2]).max(0.0);
+                let shade = (0.50 + 0.50 * diff) as f32;
+                let drill_color = Color32::from_rgb((220.0 * shade) as u8, (190.0 * shade) as u8, (100.0 * shade) as u8);
+
+                let p_tip_pt = projection.project(tip);
+                let p1 = projection.project(circle_pt(cone_h, r_tool, t0));
+                let p2 = projection.project(circle_pt(cone_h, r_tool, t1));
+                painter.add(egui::Shape::convex_polygon(vec![p_tip_pt, p1, p2], drill_color, Stroke::NONE));
+
+                let p3 = projection.project(circle_pt(flute_len, r_tool, t1));
+                let p4 = projection.project(circle_pt(flute_len, r_tool, t0));
+                painter.add(egui::Shape::convex_polygon(vec![p1, p2, p3, p4], drill_color, Stroke::NONE));
+            }
+            let tip_screen = projection.project(tip);
+            painter.circle_filled(tip_screen, 2.0, Color32::WHITE);
+        }
+        _ => {
+            // Standard flat endmill
+            for i in 0..SEGMENTS {
+                let t0 = (i as f64 / SEGMENTS as f64) * TAU;
+                let t1 = ((i + 1) as f64 / SEGMENTS as f64) * TAU;
+                let mid_t = (t0 + t1) * 0.5;
+                let norm = [
+                    v1[0] * mid_t.cos() + v2[0] * mid_t.sin(),
+                    v1[1] * mid_t.cos() + v2[1] * mid_t.sin(),
+                    v1[2] * mid_t.cos() + v2[2] * mid_t.sin(),
+                ];
+                let diff = (norm[0] * l_dir[0] + norm[1] * l_dir[1] + norm[2] * l_dir[2]).max(0.0);
+                let shade = (0.50 + 0.50 * diff) as f32;
+                let flute_color = Color32::from_rgb(
+                    (250.0 * shade) as u8,
+                    (185.0 * shade) as u8,
+                    (40.0 * shade) as u8,
+                );
+
+                let p0 = projection.project(circle_pt(0.0, r_tool, t0));
+                let p1 = projection.project(circle_pt(0.0, r_tool, t1));
+                let p2 = projection.project(circle_pt(flute_len, r_tool, t1));
+                let p3 = projection.project(circle_pt(flute_len, r_tool, t0));
+                painter.add(egui::Shape::convex_polygon(vec![p0, p1, p2, p3], flute_color, Stroke::NONE));
+            }
+            let tip_screen = projection.project(tip);
+            painter.circle_filled(tip_screen, 2.5, theme::TOOL);
+            painter.circle_filled(tip_screen, 1.0, Color32::WHITE);
+        }
+    }
+
+    // 2. Collet Chuck / Tapered Holder (Steel Gray)
+    let holder_start = flute_len;
+    let holder_len = (16.0 * part_scale).clamp(7.0, 20.0);
+    let r_holder_bot = r_tool * 1.25 + 1.5 * part_scale;
+    let r_holder_top = r_tool * 1.8 + 3.0 * part_scale;
+    for i in 0..SEGMENTS {
+        let t0 = (i as f64 / SEGMENTS as f64) * TAU;
+        let t1 = ((i + 1) as f64 / SEGMENTS as f64) * TAU;
+        let mid_t = (t0 + t1) * 0.5;
+        let norm = [
+            v1[0] * mid_t.cos() + v2[0] * mid_t.sin(),
+            v1[1] * mid_t.cos() + v2[1] * mid_t.sin(),
+            v1[2] * mid_t.cos() + v2[2] * mid_t.sin(),
+        ];
+        let diff = (norm[0] * l_dir[0] + norm[1] * l_dir[1] + norm[2] * l_dir[2]).max(0.0);
+        let shade = (0.45 + 0.55 * diff) as f32;
+        let steel_color = Color32::from_rgb(
+            (100.0 * shade) as u8,
+            (110.0 * shade) as u8,
+            (125.0 * shade) as u8,
+        );
+
+        let p0 = projection.project(circle_pt(holder_start, r_holder_bot, t0));
+        let p1 = projection.project(circle_pt(holder_start, r_holder_bot, t1));
+        let p2 = projection.project(circle_pt(holder_start + holder_len, r_holder_top, t1));
+        let p3 = projection.project(circle_pt(holder_start + holder_len, r_holder_top, t0));
+        painter.add(egui::Shape::convex_polygon(
+            vec![p0, p1, p2, p3],
+            steel_color,
+            Stroke::NONE,
+        ));
+    }
+
+    // 3. Spindle Collar (Dark Anodized Aluminum)
+    let spindle_start = holder_start + holder_len;
+    let spindle_len = (18.0 * part_scale).clamp(8.0, 22.0);
+    let r_spindle = r_holder_top + 3.5 * part_scale;
+    for i in 0..SEGMENTS {
+        let t0 = (i as f64 / SEGMENTS as f64) * TAU;
+        let t1 = ((i + 1) as f64 / SEGMENTS as f64) * TAU;
+        let mid_t = (t0 + t1) * 0.5;
+        let norm = [
+            v1[0] * mid_t.cos() + v2[0] * mid_t.sin(),
+            v1[1] * mid_t.cos() + v2[1] * mid_t.sin(),
+            v1[2] * mid_t.cos() + v2[2] * mid_t.sin(),
+        ];
+        let diff = (norm[0] * l_dir[0] + norm[1] * l_dir[1] + norm[2] * l_dir[2]).max(0.0);
+        let shade = (0.40 + 0.60 * diff) as f32;
+        let casing_color = Color32::from_rgb(
+            (48.0 * shade) as u8,
+            (56.0 * shade) as u8,
+            (72.0 * shade) as u8,
+        );
+
+        let p0 = projection.project(circle_pt(spindle_start, r_spindle, t0));
+        let p1 = projection.project(circle_pt(spindle_start, r_spindle, t1));
+        let p2 = projection.project(circle_pt(spindle_start + spindle_len, r_spindle, t1));
+        let p3 = projection.project(circle_pt(spindle_start + spindle_len, r_spindle, t0));
+        painter.add(egui::Shape::convex_polygon(
+            vec![p0, p1, p2, p3],
+            casing_color,
+            Stroke::NONE,
+        ));
+    }
+
+    // Spindle centerline vector indicator (cyan)
+    let p_nose = projection.project(circle_pt(spindle_start + spindle_len, 0.0, 0.0));
+    let p_axis_end = projection.project([
+        tip[0] + u[0] * (spindle_start + spindle_len + 30.0 * part_scale),
+        tip[1] + u[1] * (spindle_start + spindle_len + 30.0 * part_scale),
+        tip[2] + u[2] * (spindle_start + spindle_len + 30.0 * part_scale),
+    ]);
+    painter.line_segment([p_nose, p_axis_end], Stroke::new(1.2, Color32::from_rgba_unmultiplied(100, 220, 255, 180)));
+    // Cutting tool datum tip
+    let tip_screen = projection.project(tip);
+    painter.circle_filled(tip_screen, 3.5, theme::TOOL);
+    painter.circle_filled(tip_screen, 1.5, Color32::WHITE);
+}
+
+fn cube_project(v: [f32; 3], mode: ViewMode, yaw: f32, pitch: f32) -> (Vec2, f32) {
+    match mode {
+        ViewMode::Iso3d => {
+            let (sin_yaw, cos_yaw) = yaw.sin_cos();
+            let (sin_pitch, cos_pitch) = pitch.sin_cos();
+            let right = v[0] * cos_yaw + v[1] * sin_yaw;
+            let depth = v[0] * sin_yaw - v[1] * cos_yaw;
+            let up = v[2] * cos_pitch - depth * sin_pitch;
+            let facing = depth * cos_pitch + v[2] * sin_pitch;
+            (Vec2::new(right, -up), facing)
+        }
+        ViewMode::TopXy => (Vec2::new(v[0], -v[1]), v[2]),
+        ViewMode::SideXz => (Vec2::new(v[0], -v[2]), -v[1]),
+        ViewMode::SideYz => (Vec2::new(v[1], -v[2]), v[0]),
+        ViewMode::LatheXz => (Vec2::new(v[2], -v[0]), -v[1]),
+    }
+}
+
+/// Interactive 3D Orientation Navigation Cube (ViewCube) in the top-right corner.
+fn draw_view_cube(
+    painter: &Painter,
+    card_rect: Rect,
+    yaw: &mut f32,
+    pitch: &mut f32,
+    view_mode: &mut ViewMode,
+    ui: &Ui,
+) -> bool {
+    let cube_center = pos2(card_rect.right() - 50.0, card_rect.top() + 45.0);
+    let r = 18.0f32;
+
+    let raw_verts = [
+        [-1.0, -1.0, -1.0], // 0: -X -Y -Z
+        [ 1.0, -1.0, -1.0], // 1: +X -Y -Z
+        [ 1.0,  1.0, -1.0], // 2: +X +Y -Z
+        [-1.0,  1.0, -1.0], // 3: -X +Y -Z
+        [-1.0, -1.0,  1.0], // 4: -X -Y +Z
+        [ 1.0, -1.0,  1.0], // 5: +X -Y +Z
+        [ 1.0,  1.0,  1.0], // 6: +X +Y +Z
+        [-1.0,  1.0,  1.0], // 7: -X +Y +Z
+    ];
+
+    let proj_verts: Vec<Pos2> = raw_verts
+        .iter()
+        .map(|&v| {
+            let (xy, _) = cube_project(v, *view_mode, *yaw, *pitch);
+            pos2(cube_center.x + xy.x * r, cube_center.y + xy.y * r)
+        })
+        .collect();
+
+    struct CubeFaceDef {
+        indices: [usize; 4],
+        normal: [f32; 3],
+        label_key: &'static str,
+        target_yaw: f32,
+        target_pitch: f32,
+        target_mode: ViewMode,
+    }
+
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let faces = [
+        CubeFaceDef {
+            indices: [4, 5, 6, 7],
+            normal: [0.0, 0.0, 1.0],
+            label_key: "viewport.cube.top",
+            target_yaw: 0.0,
+            target_pitch: 0.0,
+            target_mode: ViewMode::TopXy,
+        },
+        CubeFaceDef {
+            indices: [0, 3, 2, 1],
+            normal: [0.0, 0.0, -1.0],
+            label_key: "viewport.cube.bottom",
+            target_yaw: 0.0,
+            target_pitch: -FRAC_PI_2,
+            target_mode: ViewMode::TopXy,
+        },
+        CubeFaceDef {
+            indices: [0, 1, 5, 4],
+            normal: [0.0, -1.0, 0.0],
+            label_key: "viewport.cube.front",
+            target_yaw: 0.0,
+            target_pitch: FRAC_PI_2,
+            target_mode: ViewMode::SideXz,
+        },
+        CubeFaceDef {
+            indices: [2, 6, 7, 3],
+            normal: [0.0, 1.0, 0.0],
+            label_key: "viewport.cube.back",
+            target_yaw: PI,
+            target_pitch: FRAC_PI_2,
+            target_mode: ViewMode::SideXz,
+        },
+        CubeFaceDef {
+            indices: [1, 2, 6, 5],
+            normal: [1.0, 0.0, 0.0],
+            label_key: "viewport.cube.right",
+            target_yaw: -FRAC_PI_2,
+            target_pitch: 0.0,
+            target_mode: ViewMode::SideYz,
+        },
+        CubeFaceDef {
+            indices: [0, 4, 7, 3],
+            normal: [-1.0, 0.0, 0.0],
+            label_key: "viewport.cube.left",
+            target_yaw: FRAC_PI_2,
+            target_pitch: 0.0,
+            target_mode: ViewMode::SideYz,
+        },
+    ];
+
+    let mut visible_faces: Vec<(usize, f32)> = Vec::new();
+    for (idx, face) in faces.iter().enumerate() {
+        let (_, facing) = cube_project(face.normal, *view_mode, *yaw, *pitch);
+        if facing > 0.02 {
+            visible_faces.push((idx, facing));
+        }
+    }
+    visible_faces.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+    let mouse_clicked = ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+    let mut clicked_face: Option<(f32, f32, ViewMode)> = None;
+
+    let point_in_quad = |pt: Pos2, p: &[Pos2]| -> bool {
+        if p.len() < 4 {
+            return false;
+        }
+        let cross = |a: Pos2, b: Pos2, c: Pos2| (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        let c0 = cross(p[0], p[1], pt);
+        let c1 = cross(p[1], p[2], pt);
+        let c2 = cross(p[2], p[3], pt);
+        let c3 = cross(p[3], p[0], pt);
+        (c0 >= 0.0 && c1 >= 0.0 && c2 >= 0.0 && c3 >= 0.0)
+            || (c0 <= 0.0 && c1 <= 0.0 && c2 <= 0.0 && c3 <= 0.0)
+    };
+
+    for &(face_idx, facing) in &visible_faces {
+        let face = &faces[face_idx];
+        let poly: Vec<Pos2> = face.indices.iter().map(|&i| proj_verts[i]).collect();
+        let hovered = pointer_pos.map_or(false, |pt| point_in_quad(pt, &poly));
+
+        if hovered && mouse_clicked && clicked_face.is_none() {
+            clicked_face = Some((face.target_yaw, face.target_pitch, face.target_mode));
+        }
+
+        let base_shade = (0.55 + 0.45 * facing.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let fill_color = if hovered {
+            Color32::from_rgba_unmultiplied(45, 125, 230, 240)
+        } else {
+            Color32::from_rgb(
+                (22.0 * base_shade + 10.0) as u8,
+                (28.0 * base_shade + 12.0) as u8,
+                (40.0 * base_shade + 18.0) as u8,
+            )
+        };
+        let stroke = if hovered {
+            Stroke::new(1.5, Color32::WHITE)
+        } else {
+            Stroke::new(1.0, Color32::from_rgb(90, 110, 135))
+        };
+
+        painter.add(egui::Shape::convex_polygon(poly.clone(), fill_color, stroke));
+
+        if facing >= 0.12 {
+            let cx = (poly[0].x + poly[1].x + poly[2].x + poly[3].x) * 0.25;
+            let cy = (poly[0].y + poly[1].y + poly[2].y + poly[3].y) * 0.25;
+            let text_color = if hovered { Color32::WHITE } else { Color32::from_rgb(230, 238, 250) };
+            painter.text(
+                pos2(cx, cy),
+                Align2::CENTER_CENTER,
+                t(face.label_key),
+                FontId::monospace(8.0),
+                text_color,
+            );
+        }
+    }
+
+    if let Some((new_yaw, new_pitch, new_mode)) = clicked_face {
+        *yaw = new_yaw;
+        *pitch = new_pitch;
+        *view_mode = new_mode;
+        true
+    } else {
+        false
+    }
+}
+
+fn draw_rotary_rings(
+    painter: &Painter,
+    projection: &Projection,
+    origin: [f64; 3],
+    axis_labels: &[String],
+    rotary_angles: [f64; 2],
+) {
+    let has_a = axis_labels.iter().any(|l| l.eq_ignore_ascii_case("A"));
+    let has_b = axis_labels.iter().any(|l| l.eq_ignore_ascii_case("B"));
+    let has_c = axis_labels.iter().any(|l| l.eq_ignore_ascii_case("C"));
+
+    if !has_a && !has_b && !has_c {
+        return;
+    }
+
+    let ring_r = 38.0;
+    const STEPS: usize = 32;
+    use std::f64::consts::TAU;
+
+    // A-Axis (rotation about X, in YZ plane)
+    if has_a {
+        let color_a = Color32::from_rgba_unmultiplied(255, 170, 40, 130);
+        let mut pts = Vec::with_capacity(STEPS + 1);
+        for i in 0..=STEPS {
+            let theta = (i as f64 / STEPS as f64) * TAU;
+            let pt = [origin[0], origin[1] + ring_r * theta.cos(), origin[2] + ring_r * theta.sin()];
+            pts.push(projection.project(pt));
+        }
+        for pair in pts.windows(2) {
+            painter.line_segment([pair[0], pair[1]], Stroke::new(1.0, color_a));
+        }
+        let label_pos = projection.project([origin[0], origin[1] + ring_r, origin[2]]);
+        painter.text(label_pos + Vec2::new(4.0, -4.0), Align2::LEFT_BOTTOM, "A 0°", FontId::monospace(9.0 * FONT_SCALE), color_a);
+
+        // Live rotary angle needle indicator
+        let a_angle = rotary_angles[0];
+        let needle_tip = projection.project([
+            origin[0],
+            origin[1] + ring_r * a_angle.cos(),
+            origin[2] + ring_r * a_angle.sin(),
+        ]);
+        let origin_screen = projection.project(origin);
+        let needle_color = Color32::from_rgb(255, 190, 60);
+        painter.line_segment([origin_screen, needle_tip], Stroke::new(1.5, needle_color));
+        painter.circle_filled(needle_tip, 2.5, needle_color);
+        let deg_label = format!("A {:.1}°", a_angle.to_degrees());
+        painter.text(needle_tip + Vec2::new(5.0, 3.0), Align2::LEFT_TOP, deg_label, FontId::monospace(8.5 * FONT_SCALE), needle_color);
+    }
+
+    // B-Axis (rotation about Y, in XZ plane)
+    if has_b {
+        let color_b = Color32::from_rgba_unmultiplied(70, 190, 255, 130);
+        let mut pts = Vec::with_capacity(STEPS + 1);
+        for i in 0..=STEPS {
+            let theta = (i as f64 / STEPS as f64) * TAU;
+            let pt = [origin[0] + ring_r * theta.cos(), origin[1], origin[2] + ring_r * theta.sin()];
+            pts.push(projection.project(pt));
+        }
+        for pair in pts.windows(2) {
+            painter.line_segment([pair[0], pair[1]], Stroke::new(1.0, color_b));
+        }
+        let label_pos = projection.project([origin[0] + ring_r, origin[1], origin[2]]);
+        painter.text(label_pos + Vec2::new(4.0, -4.0), Align2::LEFT_BOTTOM, "B 0°", FontId::monospace(9.0 * FONT_SCALE), color_b);
+
+        // Live rotary angle needle indicator
+        let b_angle = rotary_angles[1];
+        let needle_tip = projection.project([
+            origin[0] + ring_r * b_angle.cos(),
+            origin[1],
+            origin[2] + ring_r * b_angle.sin(),
+        ]);
+        let origin_screen = projection.project(origin);
+        let needle_color = Color32::from_rgb(100, 215, 255);
+        painter.line_segment([origin_screen, needle_tip], Stroke::new(1.5, needle_color));
+        painter.circle_filled(needle_tip, 2.5, needle_color);
+        let deg_label = format!("B {:.1}°", b_angle.to_degrees());
+        painter.text(needle_tip + Vec2::new(5.0, 3.0), Align2::LEFT_TOP, deg_label, FontId::monospace(8.5 * FONT_SCALE), needle_color);
+    }
+
+    // C-Axis (rotation about Z, in XY plane)
+    if has_c {
+        let color_c = Color32::from_rgba_unmultiplied(80, 225, 120, 130);
+        let mut pts = Vec::with_capacity(STEPS + 1);
+        for i in 0..=STEPS {
+            let theta = (i as f64 / STEPS as f64) * TAU;
+            let pt = [origin[0] + ring_r * theta.cos(), origin[1] + ring_r * theta.sin(), origin[2]];
+            pts.push(projection.project(pt));
+        }
+        for pair in pts.windows(2) {
+            painter.line_segment([pair[0], pair[1]], Stroke::new(1.0, color_c));
+        }
+        let label_pos = projection.project([origin[0] + ring_r, origin[1], origin[2]]);
+        painter.text(label_pos + Vec2::new(4.0, -4.0), Align2::LEFT_BOTTOM, "C 0°", FontId::monospace(9.0 * FONT_SCALE), color_c);
+    }
+}
+
+fn draw_hud(painter: &Painter, card_rect: Rect, hud: &HudOverlay) {
+    if !hud.enabled || hud.axes.is_empty() {
+        return;
+    }
+
+    let origin = card_rect.left_top() + Vec2::new(14.0, 12.0);
+    let line_h = 13.5;
+    let font_mono = FontId::monospace(8.5);
+
+    enum LineKind {
+        Axis { homed: bool, limit: bool },
+        Offset,
+        Rotation,
+        Velocity,
+    }
+
+    struct HudRow {
+        kind: LineKind,
+        left: String,
+        right: String,
+    }
+
+    let mut rows: Vec<HudRow> = Vec::new();
+
+    // 1. Positions & DTG (AXIS style compact aligned DRO)
+    let dtg_lbl = t("viewport.dro.dtg");
+    for ax in &hud.axes {
+        let left = format!("{:>6}: {:>8.4}", ax.letter, ax.work);
+        let right = format!("{} {:>1}: {:>8.4}", dtg_lbl, ax.letter, ax.dtg);
+        rows.push(HudRow {
+            kind: LineKind::Axis { homed: ax.homed, limit: ax.limit },
+            left,
+            right,
+        });
+    }
+
+    // 2. Offsets (G54 & G92)
+    for off in &hud.offsets {
+        let left = format!("{} {:>1}: {:>8.4}", hud.wcs_name, off.letter, off.g5x);
+        let right = format!("G92 {:>1}: {:>8.4}", off.letter, off.g92);
+        rows.push(HudRow {
+            kind: LineKind::Offset,
+            left,
+            right,
+        });
+    }
+
+    // 3. Rotation if any
+    if hud.rot_xy.abs() > 0.0001 {
+        rows.push(HudRow {
+            kind: LineKind::Rotation,
+            left: format!("{} R: {:>8.4}", hud.wcs_name, hud.rot_xy),
+            right: String::new(),
+        });
+    }
+
+    // 4. TLO
+    let tlo_lbl = t("viewport.dro.tlo");
+    for off in &hud.offsets {
+        if off.tlo.abs() > 0.0001 || off.letter == "Z" {
+            rows.push(HudRow {
+                kind: LineKind::Offset,
+                left: format!("{} {:>1}: {:>8.4}", tlo_lbl, off.letter, off.tlo),
+                right: String::new(),
+            });
+        }
+    }
+
+    // 5. Velocity & Feed
+    rows.push(HudRow {
+        kind: LineKind::Velocity,
+        left: format!("{:>5}: {:>8.4}", t("viewport.dro.vel"), hud.velocity),
+        right: format!("{:>4}: {:>8.1}", t("viewport.dro.feed"), hud.feed_cmd),
+    });
+
+    // 6. Travel Distances & Estimated Run Time (AXIS feature)
+    if let (Some(cut), Some(rapid)) = (hud.cut_dist_mm, hud.rapid_dist_mm) {
+        let est_str = if let Some(secs) = hud.est_time_secs {
+            let m = (secs / 60.0).floor() as u64;
+            let s = (secs % 60.0).floor() as u64;
+            format!("{:02}:{:02}", m, s)
+        } else {
+            "--:--".to_string()
+        };
+        rows.push(HudRow {
+            kind: LineKind::Velocity,
+            left: format!("{:>5}: {:>7.1}mm", t("viewport.dro.cut"), cut),
+            right: format!("{:>4}: {:>8}", t("viewport.dro.est"), est_str),
+        });
+        rows.push(HudRow {
+            kind: LineKind::Velocity,
+            left: format!("{:>5}: {:>7.1}mm", t("viewport.dro.rap"), rapid),
+            right: String::new(),
+        });
+    }
+
+    // 7. Trajectory Blending Mode & Tolerance (G64 / G61)
+    if let Some(blend) = &hud.blend_info {
+        rows.push(HudRow {
+            kind: LineKind::Velocity,
+            left: format!(" Path: {:>8}", blend),
+            right: String::new(),
+        });
+    }
+
+    // Transparent floating HUD overlay on top of 3D canvas (no solid box container, matching AXIS)
+    let mut y = origin.y;
+    for row in rows {
+        let left_color = match row.kind {
+            LineKind::Axis { limit, homed } => {
+                if limit {
+                    theme::ERROR
+                } else if homed {
+                    Color32::from_rgb(230, 235, 245)
+                } else {
+                    Color32::from_rgb(250, 190, 50)
+                }
+            }
+            LineKind::Offset => Color32::from_rgb(230, 235, 245),
+            LineKind::Rotation => Color32::from_rgb(240, 200, 80),
+            LineKind::Velocity => Color32::from_rgb(215, 225, 235),
+        };
+
+        painter.text(
+            Pos2::new(origin.x, y),
+            Align2::LEFT_TOP,
+            &row.left,
+            font_mono.clone(),
+            left_color,
+        );
+
+        if !row.right.is_empty() {
+            painter.text(
+                Pos2::new(origin.x + 112.0, y),
+                Align2::LEFT_TOP,
+                &row.right,
+                font_mono.clone(),
+                Color32::from_rgb(215, 225, 235),
+            );
+        }
+
+        y += line_h;
+    }
 }
 
 /// The viewport width in model units, written the way a dimension is: whole
@@ -1802,7 +2864,7 @@ pub fn axis_triad(
     out
 }
 
-/// A small X/Y/Z indicator in the graph's top-right corner.
+/// A small X/Y/Z indicator in the graph's bottom-left corner.
 ///
 /// The arrow direction comes from the same projection as the part, so it turns
 /// with the orbit. An axis that points at the viewer has no screen direction and
@@ -1817,7 +2879,7 @@ fn draw_axis_triad(
     mirror_x: bool,
     labels: &[String],
 ) {
-    let center = rect.right_top() + Vec2::new(-46.0, 42.0);
+    let center = rect.left_bottom() + Vec2::new(36.0, -36.0);
     let length = 18.0;
     let font = FontId::monospace(9.0 * FONT_SCALE);
     // Half the height of the 9 px face, so labels count towards the arm's reach.
@@ -1947,47 +3009,48 @@ fn draw_bounds_dimensions(
     bounds: Bounds3,
     work_offset: Option<[f64; 3]>,
     variant: MachineVariant,
+    limits: Option<Bounds3>,
 ) {
     let min = bounds.min;
     let max = bounds.max;
     let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-    // Annotation size in pixels, converted to model units, so the dimensions
-    // stay readable at any zoom the way a drawing's text does. The label tracks
-    // the box's longest side and keeps an 18 px screen floor, see
-    // `dimension_glyph`; the gap follows the grown label so the dimension line
-    // keeps clear of it.
-    let pixels_per_unit = (projection.scale * projection.zoom).max(1e-6) as f64;
+    let max_dim = size[0].max(size[1]).max(size[2]).max(2.0);
+    let limits_exceeded = |axis: usize| -> bool {
+        if let Some(lim) = limits {
+            min[axis] < lim.min[axis] - 0.01 || max[axis] > lim.max[axis] + 0.01
+        } else {
+            false
+        }
+    };
     let glyph = dimension_glyph(bounds, projection);
-    let gap = (glyph * 1.2).max(22.0 / pixels_per_unit);
+    let gap = (glyph * 1.4).max((max_dim * 0.06).clamp(2.5, 25.0));
+    let show_coords_x = max_dim >= 90.0 && size[0] >= glyph * 8.0;
+    let show_coords_y = max_dim >= 90.0 && size[1] >= glyph * 8.0;
+    let show_coords_z = max_dim >= 90.0 && size[2] >= glyph * 8.0;
     let color = theme::dim(theme::CYAN, 190);
+    let color_x = if limits_exceeded(0) { theme::ERROR } else { color };
+    let color_y = if limits_exceeded(1) { theme::ERROR } else { color };
+    let color_z = if limits_exceeded(2) { theme::ERROR } else { color };
     let offset = work_offset.unwrap_or([0.0; 3]);
     let pad = glyph * 0.6;
     let row = glyph * 1.1;
-    // In a side view the dimension measured along the view axis collapses to a
-    // point. Its labels have nowhere to stand, so they are left out entirely
-    // rather than piled up on the drawing.
     let hidden = view_axis(projection);
 
-    // The drawing is laid out around the box as the operator sees it, and the
-    // camera now stands in front of the machine (+Y runs into the screen). That
-    // swaps which model corner appears where: the upper-right edge is the max-Y
-    // one now, so the X dimension moves there and its values, offsets and glyph
-    // tops are mirrored in Y with it. The Y dimension keeps the min-X edge,
-    // which is still the upper-left one. Done this way every label lands in
-    // exactly the same place on screen as it did when the camera was behind the
-    // machine.
-
-    // X: outside the back edge, on the ground plane. The length sits in the
-    // middle; each end carries the work coordinate of that end.
+    // X: outside the back edge, on the ground plane.
     dimension_line(
         painter,
         projection,
         [min[0], max[1], min[2]],
         [max[0], max[1], min[2]],
         [0.0, gap, 0.0],
-        color,
+        color_x,
     );
     if hidden != Some('X') {
+        let x_label = if limits_exceeded(0) {
+            format!("{:.2} [LIMIT!]", size[0])
+        } else {
+            format!("{:.2}", size[0])
+        };
         put_label(
             painter,
             projection,
@@ -1995,42 +3058,44 @@ fn draw_bounds_dimensions(
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
             glyph,
-            &format!("{:.2}", size[0]),
-            color,
+            &x_label,
+            color_x,
             None,
         );
-        let start_text = format!("X{:.1}", min[0] - offset[0]);
-        put_label(
-            painter,
-            projection,
-            [
-                min[0] - pad,
-                max[1] + gap + row + pad + text_width(&start_text, glyph) * 0.5,
-                min[2],
-            ],
-            [0.0, 1.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            glyph,
-            &start_text,
-            color,
-            Some(([min[0], max[1] + gap, min[2]], [-1.0, 0.0, 0.0])),
-        );
-        let end_text = format!("X{:.1}", max[0] - offset[0]);
-        put_label(
-            painter,
-            projection,
-            [
-                max[0] + pad,
-                max[1] + gap + row + pad + text_width(&end_text, glyph) * 0.5,
-                min[2],
-            ],
-            [0.0, 1.0, 0.0],
-            [-1.0, 0.0, 0.0],
-            glyph,
-            &end_text,
-            color,
-            Some(([max[0], max[1] + gap, min[2]], [1.0, 0.0, 0.0])),
-        );
+        if show_coords_x {
+            let start_text = format!("X{:.1}", min[0] - offset[0]);
+            put_label(
+                painter,
+                projection,
+                [
+                    min[0] - pad,
+                    max[1] + gap + row + pad + text_width(&start_text, glyph) * 0.5,
+                    min[2],
+                ],
+                [0.0, 1.0, 0.0],
+                [-1.0, 0.0, 0.0],
+                glyph,
+                &start_text,
+                color_x,
+                Some(([min[0], max[1] + gap, min[2]], [-1.0, 0.0, 0.0])),
+            );
+            let end_text = format!("X{:.1}", max[0] - offset[0]);
+            put_label(
+                painter,
+                projection,
+                [
+                    max[0] + pad,
+                    max[1] + gap + row + pad + text_width(&end_text, glyph) * 0.5,
+                    min[2],
+                ],
+                [0.0, 1.0, 0.0],
+                [-1.0, 0.0, 0.0],
+                glyph,
+                &end_text,
+                color_x,
+                Some(([max[0], max[1] + gap, min[2]], [1.0, 0.0, 0.0])),
+            );
+        }
     }
 
     // Y: outside the left edge, reading along Y.
@@ -2040,9 +3105,14 @@ fn draw_bounds_dimensions(
         [min[0], max[1], min[2]],
         [min[0], min[1], min[2]],
         [-gap, 0.0, 0.0],
-        color,
+        color_y,
     );
     if hidden != Some('Y') {
+        let y_label = if limits_exceeded(1) {
+            format!("{:.2} [LIMIT!]", size[1])
+        } else {
+            format!("{:.2}", size[1])
+        };
         put_label(
             painter,
             projection,
@@ -2050,78 +3120,67 @@ fn draw_bounds_dimensions(
             [0.0, 1.0, 0.0],
             [-1.0, 0.0, 0.0],
             glyph,
-            &format!("{:.2}", size[1]),
-            color,
+            &y_label,
+            color_y,
             None,
         );
-        // Each end value stays at its own end: the ends of a dimension are not
-        // interchangeable, so the near coordinate belongs at the near end even
-        // though the mirrored drawing moved which end of the line appears where.
-        let start_text = format!("Y{:.1}", min[1] - offset[1]);
-        put_label(
-            painter,
-            projection,
-            [
-                min[0] - gap - row - text_width(&start_text, glyph) * 0.5,
-                min[1] - pad,
-                min[2],
-            ],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            glyph,
-            &start_text,
-            color,
-            Some(([min[0] - gap, min[1], min[2]], [0.0, -1.0, 0.0])),
-        );
-        let end_text = format!("Y{:.1}", max[1] - offset[1]);
-        put_label(
-            painter,
-            projection,
-            [
-                min[0] - gap - row - text_width(&end_text, glyph) * 0.5,
-                max[1] + pad,
-                min[2],
-            ],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            glyph,
-            &end_text,
-            color,
-            Some(([min[0] - gap, max[1], min[2]], [0.0, 1.0, 0.0])),
-        );
+        if show_coords_y {
+            let start_text = format!("Y{:.1}", min[1] - offset[1]);
+            put_label(
+                painter,
+                projection,
+                [
+                    min[0] - gap - row - text_width(&start_text, glyph) * 0.5,
+                    min[1] - pad,
+                    min[2],
+                ],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                glyph,
+                &start_text,
+                color_y,
+                Some(([min[0] - gap, min[1], min[2]], [0.0, -1.0, 0.0])),
+            );
+            let end_text = format!("Y{:.1}", max[1] - offset[1]);
+            put_label(
+                painter,
+                projection,
+                [
+                    min[0] - gap - row - text_width(&end_text, glyph) * 0.5,
+                    max[1] + pad,
+                    min[2],
+                ],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                glyph,
+                &end_text,
+                color_y,
+                Some(([min[0] - gap, max[1], min[2]], [0.0, 1.0, 0.0])),
+            );
+        }
     }
 
-    // Z: up the front-left corner (min X, min Y), which is the corner on the
-    // left of the drawing. The far corner already carries the X and Y
-    // dimensions and their witnesses.
-    //
-    // The labels stand in the XZ plane: like the X and Y dimensions, a label
-    // reads along its own axis and its glyph tops point away from the box, so
-    // the Z text lies flat across X instead of turning into the YZ plane. `up`
-    // is -X, not +X, or the letters come out mirrored.
+    // Z: up the front-left corner
     dimension_line(
         painter,
         projection,
         [min[0], min[1], min[2]],
         [min[0], min[1], max[2]],
         [-gap * 1.4, -gap * 1.4, 0.0],
-        color,
+        color_z,
     );
     let start_text = format!("Z{:.1}", min[2] - offset[2]);
     let end_text = format!("Z{:.1}", max[2] - offset[2]);
-    // Y stays on the line so every label is coplanar with it.
     let z_line_x = min[0] - gap * 1.4;
     let z_label_y = min[1] - gap * 1.4;
+    let z_label = if limits_exceeded(2) {
+        format!("{:.2} [LIMIT!]", size[2])
+    } else {
+        format!("{:.2}", size[2])
+    };
     if hidden != Some('Z') && variant == MachineVariant::Lathe {
-        // The turning view draws Z across the screen with X up it, so the mill's
-        // label plane would stand every one of these on its head: they read along
-        // the line instead, upright, one row clear of it.
         let up = z_label_up(projection, variant);
         let row = glyph * 1.7;
-        // The measuring line runs outside the box at min X; the labels sit
-        // further outside it, on the -X side. Glyph-up stays up so the text
-        // remains upright, but it must not double as the row offset: +X there
-        // pushed every label back toward the box.
         let at = |z: f64, shift: f64| lathe_z_label_anchor(z_line_x, z_label_y, row, z, shift);
         put_label(
             painter,
@@ -2130,34 +3189,36 @@ fn draw_bounds_dimensions(
             [0.0, 0.0, 1.0],
             up,
             glyph,
-            &format!("{:.2}", size[2]),
-            color,
+            &z_label,
+            color_z,
             None,
         );
-        let start_width = text_width(&start_text, glyph);
-        put_label(
-            painter,
-            projection,
-            at(min[2], -pad - start_width * 0.5),
-            [0.0, 0.0, 1.0],
-            up,
-            glyph,
-            &start_text,
-            color,
-            None,
-        );
-        let end_width = text_width(&end_text, glyph);
-        put_label(
-            painter,
-            projection,
-            at(max[2], pad + end_width * 0.5),
-            [0.0, 0.0, 1.0],
-            up,
-            glyph,
-            &end_text,
-            color,
-            None,
-        );
+        if show_coords_z {
+            let start_width = text_width(&start_text, glyph);
+            put_label(
+                painter,
+                projection,
+                at(min[2], -pad - start_width * 0.5),
+                [0.0, 0.0, 1.0],
+                up,
+                glyph,
+                &start_text,
+                color_z,
+                None,
+            );
+            let end_width = text_width(&end_text, glyph);
+            put_label(
+                painter,
+                projection,
+                at(max[2], pad + end_width * 0.5),
+                [0.0, 0.0, 1.0],
+                up,
+                glyph,
+                &end_text,
+                color_z,
+                None,
+            );
+        }
     } else if hidden != Some('Z') {
         put_label(
             painter,
@@ -2170,43 +3231,40 @@ fn draw_bounds_dimensions(
             [0.0, 0.0, 1.0],
             [-1.0, 0.0, 0.0],
             glyph,
-            &format!("{:.2}", size[2]),
-            color,
+            &z_label,
+            color_z,
             None,
         );
-        // The two end values are the length label turned a quarter turn clockwise
-        // about Y: they read along +X with their caps up +Z, so they are written
-        // horizontally, centred on the line and clear of its end by a pad. Below
-        // and above the line is the only room for horizontal text, since sideways
-        // they would run back across it.
-        put_label(
-            painter,
-            projection,
-            [z_line_x, z_label_y, min[2] - pad - glyph * 0.5],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            glyph,
-            &start_text,
-            color,
-            Some((
-                [min[0] - gap * 1.4, min[1] - gap * 1.4, min[2]],
-                [0.0, 0.0, -1.0],
-            )),
-        );
-        put_label(
-            painter,
-            projection,
-            [z_line_x, z_label_y, max[2] + pad + glyph * 0.5],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            glyph,
-            &end_text,
-            color,
-            Some((
-                [min[0] - gap * 1.4, min[1] - gap * 1.4, max[2]],
+        if show_coords_z {
+            put_label(
+                painter,
+                projection,
+                [z_line_x, z_label_y, min[2] - pad - glyph * 0.5],
+                [1.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0],
-            )),
-        );
+                glyph,
+                &start_text,
+                color_z,
+                Some((
+                    [min[0] - gap * 1.4, min[1] - gap * 1.4, min[2]],
+                    [0.0, 0.0, -1.0],
+                )),
+            );
+            put_label(
+                painter,
+                projection,
+                [z_line_x, z_label_y, max[2] + pad + glyph * 0.5],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                glyph,
+                &end_text,
+                color_z,
+                Some((
+                    [min[0] - gap * 1.4, min[1] - gap * 1.4, max[2]],
+                    [0.0, 0.0, 1.0],
+                )),
+            );
+        }
     }
 }
 
@@ -2452,6 +3510,206 @@ fn draw_bounds_filled(painter: &Painter, projection: &Projection, bounds: Bounds
         ],
     ] {
         painter.add(egui::Shape::convex_polygon(face, fill, Stroke::NONE));
+    }
+}
+
+fn draw_cylinder_stock(
+    painter: &Painter,
+    projection: &Projection,
+    center: [f64; 3],
+    radius: f64,
+    height: f64,
+    fill: Color32,
+    edge: Color32,
+) {
+    let segments = 36usize;
+    let mut bottom_ring: Vec<Pos2> = Vec::with_capacity(segments);
+    let mut top_ring: Vec<Pos2> = Vec::with_capacity(segments);
+    let stroke = Stroke::new(1.0, edge);
+
+    for i in 0..segments {
+        let theta = (i as f64) * (2.0 * std::f64::consts::PI / segments as f64);
+        let x = center[0] + radius * theta.cos();
+        let y = center[1] + radius * theta.sin();
+        let b_pt = projection.project([x, y, center[2]]);
+        let t_pt = projection.project([x, y, center[2] + height]);
+        bottom_ring.push(b_pt);
+        top_ring.push(t_pt);
+    }
+
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        painter.line_segment([bottom_ring[i], bottom_ring[next]], stroke);
+        painter.line_segment([top_ring[i], top_ring[next]], stroke);
+
+        painter.add(egui::Shape::convex_polygon(
+            vec![bottom_ring[i], bottom_ring[next], top_ring[next], top_ring[i]],
+            fill,
+            Stroke::NONE,
+        ));
+
+        if i % (segments / 4) == 0 {
+            painter.line_segment([bottom_ring[i], top_ring[i]], stroke);
+        }
+    }
+
+    painter.add(egui::Shape::convex_polygon(bottom_ring, fill, Stroke::NONE));
+    painter.add(egui::Shape::convex_polygon(top_ring, fill, Stroke::NONE));
+}
+
+fn draw_tube_stock(
+    painter: &Painter,
+    projection: &Projection,
+    center: [f64; 3],
+    outer_radius: f64,
+    inner_radius: f64,
+    height: f64,
+    fill: Color32,
+    edge: Color32,
+) {
+    let segments = 36usize;
+    let mut b_outer: Vec<Pos2> = Vec::with_capacity(segments);
+    let mut t_outer: Vec<Pos2> = Vec::with_capacity(segments);
+    let mut b_inner: Vec<Pos2> = Vec::with_capacity(segments);
+    let mut t_inner: Vec<Pos2> = Vec::with_capacity(segments);
+    let stroke_outer = Stroke::new(1.0, edge);
+    let stroke_inner = Stroke::new(0.8, Color32::from_rgba_unmultiplied(edge.r(), edge.g(), edge.b(), 180));
+
+    for i in 0..segments {
+        let theta = (i as f64) * (2.0 * std::f64::consts::PI / segments as f64);
+        let cos_t = theta.cos();
+        let sin_t = theta.sin();
+
+        let ox = center[0] + outer_radius * cos_t;
+        let oy = center[1] + outer_radius * sin_t;
+        b_outer.push(projection.project([ox, oy, center[2]]));
+        t_outer.push(projection.project([ox, oy, center[2] + height]));
+
+        let ix = center[0] + inner_radius * cos_t;
+        let iy = center[1] + inner_radius * sin_t;
+        b_inner.push(projection.project([ix, iy, center[2]]));
+        t_inner.push(projection.project([ix, iy, center[2] + height]));
+    }
+
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        // Outer wall wireframe & faces
+        painter.line_segment([b_outer[i], b_outer[next]], stroke_outer);
+        painter.line_segment([t_outer[i], t_outer[next]], stroke_outer);
+        painter.add(egui::Shape::convex_polygon(
+            vec![b_outer[i], b_outer[next], t_outer[next], t_outer[i]],
+            fill,
+            Stroke::NONE,
+        ));
+
+        // Inner bore wireframe
+        painter.line_segment([b_inner[i], b_inner[next]], stroke_inner);
+        painter.line_segment([t_inner[i], t_inner[next]], stroke_inner);
+
+        // Top and bottom annulus (ring) quads
+        painter.add(egui::Shape::convex_polygon(
+            vec![t_outer[i], t_outer[next], t_inner[next], t_inner[i]],
+            fill,
+            Stroke::NONE,
+        ));
+        painter.add(egui::Shape::convex_polygon(
+            vec![b_outer[i], b_outer[next], b_inner[next], b_inner[i]],
+            fill,
+            Stroke::NONE,
+        ));
+
+        // Ribs at 4 quadrants
+        if i % (segments / 4) == 0 {
+            painter.line_segment([b_outer[i], t_outer[i]], stroke_outer);
+            painter.line_segment([b_inner[i], t_inner[i]], stroke_inner);
+        }
+    }
+}
+
+fn draw_workplane_grid(
+    painter: &Painter,
+    projection: &Projection,
+    plane: &str,
+    center: [f64; 3],
+    half_size: f64,
+    fill: Color32,
+    edge: Color32,
+) {
+    let divisions = 4;
+    let stroke = Stroke::new(1.0, edge);
+    let sub_stroke = Stroke::new(0.6, Color32::from_rgba_unmultiplied(edge.r(), edge.g(), edge.b(), 90));
+
+    // Determine plane orientation: G17 (XY), G18 (XZ), G19 (YZ)
+    match plane {
+        "G18" => {
+            // XZ plane at Y = center[1]
+            let y = center[1];
+            let x0 = center[0] - half_size;
+            let x1 = center[0] + half_size;
+            let z0 = center[2] - half_size;
+            let z1 = center[2] + half_size;
+
+            let p00 = projection.project([x0, y, z0]);
+            let p10 = projection.project([x1, y, z0]);
+            let p11 = projection.project([x1, y, z1]);
+            let p01 = projection.project([x0, y, z1]);
+
+            painter.add(egui::Shape::convex_polygon(vec![p00, p10, p11, p01], fill, stroke));
+
+            for i in 1..divisions {
+                let frac = i as f64 / divisions as f64;
+                let x = x0 + (x1 - x0) * frac;
+                let z = z0 + (z1 - z0) * frac;
+                painter.line_segment([projection.project([x, y, z0]), projection.project([x, y, z1])], sub_stroke);
+                painter.line_segment([projection.project([x0, y, z]), projection.project([x1, y, z])], sub_stroke);
+            }
+        }
+        "G19" => {
+            // YZ plane at X = center[0]
+            let x = center[0];
+            let y0 = center[1] - half_size;
+            let y1 = center[1] + half_size;
+            let z0 = center[2] - half_size;
+            let z1 = center[2] + half_size;
+
+            let p00 = projection.project([x, y0, z0]);
+            let p10 = projection.project([x, y1, z0]);
+            let p11 = projection.project([x, y1, z1]);
+            let p01 = projection.project([x, y0, z1]);
+
+            painter.add(egui::Shape::convex_polygon(vec![p00, p10, p11, p01], fill, stroke));
+
+            for i in 1..divisions {
+                let frac = i as f64 / divisions as f64;
+                let y = y0 + (y1 - y0) * frac;
+                let z = z0 + (z1 - z0) * frac;
+                painter.line_segment([projection.project([x, y, z0]), projection.project([x, y, z1])], sub_stroke);
+                painter.line_segment([projection.project([x, y0, z]), projection.project([x, y1, z])], sub_stroke);
+            }
+        }
+        _ => {
+            // Default G17: XY plane at Z = center[2]
+            let z = center[2];
+            let x0 = center[0] - half_size;
+            let x1 = center[0] + half_size;
+            let y0 = center[1] - half_size;
+            let y1 = center[1] + half_size;
+
+            let p00 = projection.project([x0, y0, z]);
+            let p10 = projection.project([x1, y0, z]);
+            let p11 = projection.project([x1, y1, z]);
+            let p01 = projection.project([x0, y1, z]);
+
+            painter.add(egui::Shape::convex_polygon(vec![p00, p10, p11, p01], fill, stroke));
+
+            for i in 1..divisions {
+                let frac = i as f64 / divisions as f64;
+                let x = x0 + (x1 - x0) * frac;
+                let y = y0 + (y1 - y0) * frac;
+                painter.line_segment([projection.project([x, y0, z]), projection.project([x, y1, z])], sub_stroke);
+                painter.line_segment([projection.project([x0, y, z]), projection.project([x1, y, z])], sub_stroke);
+            }
+        }
     }
 }
 
@@ -3759,6 +5017,83 @@ mod tests {
     /// one it is cutting, so what is drawn is what is still to come. The mode is
     /// what eats: a line number without it changes nothing.
     #[test]
+    fn hud_overlay_draws_on_toolpath_card() {
+        let bounds = Bounds3 {
+            min: [-10.0, -10.0, -10.0],
+            max: [10.0, 10.0, 10.0],
+        };
+        let preview = Preview {
+            bounds: Some(bounds),
+            ..Preview::empty()
+        };
+        let mut view = TrajectoryView::new(&preview, &[], MachineVariant::Mill);
+        view.hud = Some(HudOverlay {
+            enabled: true,
+            axes: vec![
+                HudAxis {
+                    letter: "X".into(),
+                    work: 12.3456,
+                    dtg: 0.0,
+                    homed: true,
+                    limit: false,
+                },
+                HudAxis {
+                    letter: "Y".into(),
+                    work: 23.4567,
+                    dtg: 1.5,
+                    homed: true,
+                    limit: false,
+                },
+                HudAxis {
+                    letter: "Z".into(),
+                    work: -5.0000,
+                    dtg: 0.0,
+                    homed: false,
+                    limit: true,
+                },
+            ],
+            wcs_name: "G54".into(),
+            offsets: vec![
+                HudOffset {
+                    letter: "X".into(),
+                    g5x: 0.0,
+                    g92: 0.0,
+                    tlo: 0.0,
+                },
+                HudOffset {
+                    letter: "Y".into(),
+                    g5x: 0.0,
+                    g92: 0.0,
+                    tlo: 0.0,
+                },
+                HudOffset {
+                    letter: "Z".into(),
+                    g5x: -50.0,
+                    g92: 0.0,
+                    tlo: 15.0,
+                },
+            ],
+            rot_xy: 0.0,
+            velocity: 120.0,
+            feed_cmd: 800.0,
+            est_time_secs: Some(184.0),
+            cut_dist_mm: Some(350.5),
+            rapid_dist_mm: Some(120.0),
+            blend_info: None,
+        });
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            draw_trajectory(ui, &mut view);
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
     fn remaining_eats_the_blocks_that_are_already_cut() {
         let axes = vec!["X".to_string(), "Y".to_string(), "Z".to_string()];
         let text = "G21 G0 X0 Y0 Z5\nG1 X10\nG1 Y10\nG1 X0\n";
@@ -4170,4 +5505,174 @@ mod tests {
             view.pan
         );
     }
+
+    #[test]
+    fn picking_a_3d_toolpath_segment_selects_line() {
+        let segment = PathSegment {
+            start: [0.0, 0.0, 0.0],
+            end: [50.0, 0.0, 0.0],
+            kind: SegmentKind::Feed,
+            line: 42,
+            arc: None,
+            tool: None,
+        };
+        let preview = Preview {
+            segments: vec![segment],
+            bounds: Some(Bounds3 {
+                min: [0.0, 0.0, 0.0],
+                max: [50.0, 0.0, 0.0],
+            }),
+            ..Preview::empty()
+        };
+        let mut view = TrajectoryView::new(&preview, &[], MachineVariant::Mill);
+        view.view = ViewMode::TopXy;
+        view.height = 600.0;
+        view.fit = false;
+        view.auto_fit = false;
+
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let projection = Projection::new(
+            view.preview.bounds.unwrap(),
+            rect.shrink(12.0),
+            view.view,
+            view.yaw,
+            view.pitch,
+            1.0,
+            Vec2::ZERO,
+        );
+        let mid_screen = projection.project([25.0, 0.0, 0.0]);
+
+        let frame0 = egui::RawInput {
+            screen_rect: Some(rect),
+            events: vec![egui::Event::PointerMoved(mid_screen)],
+            ..Default::default()
+        };
+        let mut out0 = ctx.run_ui(frame0, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                draw_trajectory(ui, &mut view);
+            });
+        });
+        out0.textures_delta.clear();
+
+        let frame1 = egui::RawInput {
+            screen_rect: Some(rect),
+            events: vec![egui::Event::PointerButton {
+                pos: mid_screen,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut out1 = ctx.run_ui(frame1, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                draw_trajectory(ui, &mut view);
+            });
+        });
+        out1.textures_delta.clear();
+
+        let frame2 = egui::RawInput {
+            screen_rect: Some(rect),
+            events: vec![egui::Event::PointerButton {
+                pos: mid_screen,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut out2 = ctx.run_ui(frame2, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                draw_trajectory(ui, &mut view);
+            });
+        });
+        out2.textures_delta.clear();
+
+        assert_eq!(view.selected_line, Some(42));
+        assert_eq!(view.picked_line, Some(42));
+    }
+
+    #[test]
+    fn dwell_marker_and_workpiece_stock_render_without_panics() {
+        use linc_core::gcode::{DwellMarker, WorkpieceStock};
+        let bounds = Bounds3 {
+            min: [-50.0, -50.0, -20.0],
+            max: [50.0, 50.0, 10.0],
+        };
+        let preview = Preview {
+            bounds: Some(bounds),
+            dwells: vec![DwellMarker {
+                point: [10.0, 15.0, 0.0],
+                seconds: 2.0,
+                line: 12,
+            }],
+            workpiece: Some(WorkpieceStock::Box {
+                min: [-60.0, -60.0, -25.0],
+                max: [60.0, 60.0, 0.0],
+            }),
+            ..Preview::empty()
+        };
+        let mut view = TrajectoryView::new(&preview, &[], MachineVariant::Mill);
+        view.show_stock = true;
+        view.stock_alpha = 40;
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input.clone(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                draw_trajectory(ui, &mut view);
+            });
+        });
+        out.textures_delta.clear();
+
+        // Also test cylinder stock
+        let preview2 = Preview {
+            bounds: Some(bounds),
+            workpiece: Some(WorkpieceStock::Cylinder {
+                center: [0.0, 0.0, -20.0],
+                radius: 35.0,
+                height: 20.0,
+            }),
+            ..Preview::empty()
+        };
+        let mut view2 = TrajectoryView::new(&preview2, &[], MachineVariant::Mill);
+        view2.show_stock = true;
+        view2.stock_alpha = 40;
+        let mut out2 = ctx.run_ui(input.clone(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                draw_trajectory(ui, &mut view2);
+            });
+        });
+        out2.textures_delta.clear();
+
+        // Also test tube stock and workplane grid
+        let preview3 = Preview {
+            bounds: Some(bounds),
+            workpiece: Some(WorkpieceStock::Tube {
+                center: [0.0, 0.0, -25.0],
+                outer_radius: 40.0,
+                inner_radius: 25.0,
+                height: 25.0,
+            }),
+            ..Preview::empty()
+        };
+        let mut view3 = TrajectoryView::new(&preview3, &[], MachineVariant::Mill);
+        view3.show_stock = true;
+        view3.stock_alpha = 40;
+        view3.show_workplane = true;
+        view3.show_toggles = true;
+        let mut out3 = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                draw_trajectory(ui, &mut view3);
+            });
+        });
+        out3.textures_delta.clear();
+    }
 }
+
+/// Shared physical-panel pictograms.
+pub mod panel_icons;

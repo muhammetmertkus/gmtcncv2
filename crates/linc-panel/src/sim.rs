@@ -88,6 +88,8 @@ pub struct SimPanelState {
     pub program_protect: bool,
     /// Simulated probe contact. Asserted only while the panel PROBE key is held.
     pub probe: bool,
+    /// Remote probe hold expires independently of the local panel window.
+    pub remote_probe_until: Option<Instant>,
     pub buttons: u64,
     pub leds: u64,
     pub sseg_tool: i32,
@@ -174,6 +176,7 @@ impl Default for SimPanelState {
             spindle_override: 1.0,
             program_protect: false,
             probe: false,
+            remote_probe_until: None,
             buttons: 0,
             leds: 0,
             sseg_tool: 12,
@@ -237,8 +240,12 @@ impl SimPanelState {
         if released == 0 {
             return false;
         }
-        self.buttons &= !released;
-        true
+        // A later lease may contain some of the same keys. Expiring an
+        // earlier multi-key lease must not cancel a still-live hold.
+        let still_held = self.holds.iter().fold(0u64, |mask, (held, _)| mask | held);
+        let before = self.buttons;
+        self.buttons &= !(released & !still_held);
+        self.buttons != before
     }
 
     pub fn led(&self, mask: u64) -> bool {
@@ -253,6 +260,13 @@ impl SimPanelState {
         press: u64,
         release: u64,
     ) -> Result<(), DiagError> {
+        if let Some(key) = patch.power_key.as_deref() {
+            if patch.power.is_some() || !matches!(key, "on" | "off") {
+                return Err(DiagError::invalid_argument(
+                    "power_key must be on or off and cannot be combined with power",
+                ));
+            }
+        }
         if let Some(connected) = patch.connected {
             self.connected = connected;
         }
@@ -291,6 +305,18 @@ impl SimPanelState {
                 }
             }
             self.power = power;
+        }
+        if let Some(key) = patch.power_key.as_deref() {
+            if key == "on" {
+                self.power = true;
+                self.estop = false;
+                self.power_on_pulse = true;
+                self.power_off_pulse = false;
+            } else {
+                self.power = false;
+                self.power_on_pulse = false;
+                self.power_off_pulse = true;
+            }
         }
         self.buttons |= press;
         self.buttons &= !release;
@@ -377,17 +403,60 @@ impl Default for SimPanelHandle {
 /// `--allow-sim-control`; a real panel has no instance of it.
 pub struct SimControlState {
     handle: SimPanelHandle,
+    probe_enabled: bool,
+    wiring: Mutex<WiringState>,
+}
+
+struct WiringState {
+    use_hal: bool,
+    reader: Option<linc_hal::HalReader>,
+    checked: Option<Instant>,
+    disconnected: Option<u64>,
 }
 
 impl SimControlState {
     pub fn new(handle: SimPanelHandle) -> Self {
-        Self { handle }
+        Self::new_with_hal(handle, false, false)
+    }
+
+    pub fn new_with_hal(handle: SimPanelHandle, use_hal: bool, probe_enabled: bool) -> Self {
+        Self {
+            handle,
+            probe_enabled,
+            wiring: Mutex::new(WiringState {
+                use_hal,
+                reader: None,
+                checked: None,
+                disconnected: if use_hal { None } else { Some(0) },
+            }),
+        }
+    }
+
+    fn disconnected_buttons(&self) -> Option<Vec<&'static str>> {
+        let mut wiring = self
+            .wiring
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if wiring.use_hal
+            && wiring
+                .checked
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+        {
+            if wiring.reader.is_none() {
+                wiring.reader = linc_hal::HalReader::new_with_role("panel_embedded").ok();
+            }
+            wiring.disconnected = wiring.reader.as_ref().map(disconnected_button_mask);
+            wiring.checked = Some(Instant::now());
+        }
+        wiring.disconnected.map(|mask| pressed_button_names(mask))
     }
 
     fn state_value(&self) -> Value {
         let state = self.handle.snapshot();
         json!({
             "connected": state.connected,
+            "probe_enabled": self.probe_enabled,
+            "disconnected_buttons": self.disconnected_buttons(),
             "error": state.error,
             "estop": state.estop,
             "power": state.power,
@@ -400,6 +469,7 @@ impl SimControlState {
             "buttons_hex": format!("0x{:016x}", state.buttons),
             "pressed": pressed_button_names(state.buttons),
             "leds": state.leds,
+            "active_leds": crate::LED_PINS.iter().filter_map(|(name, mask)| (state.leds & mask != 0).then_some(*name)).collect::<Vec<_>>(),
             "sseg_tool": state.sseg_tool,
             "sseg_next_tool": state.sseg_next_tool,
             "sseg_status": state.sseg_status,
@@ -450,14 +520,42 @@ impl linc_diag::SimControl for SimControlState {
         release: &[String],
         duration_ms: Option<u64>,
     ) -> Result<Value, DiagError> {
-        let press_mask = resolve_buttons(press)?;
-        let release_mask = resolve_buttons(release)?;
+        let probe_press = press.iter().any(|name| name == "probe_contact");
+        let probe_release = release.iter().any(|name| name == "probe_contact");
+        if (probe_press || probe_release) && !self.probe_enabled {
+            return Err(DiagError::invalid_argument("probe contact is disabled"));
+        }
+        if probe_press && (probe_release || duration_ms.is_none()) {
+            return Err(DiagError::invalid_argument(
+                "probe contact requires a bounded press",
+            ));
+        }
+        let panel_press: Vec<_> = press
+            .iter()
+            .filter(|name| name.as_str() != "probe_contact")
+            .cloned()
+            .collect();
+        let panel_release: Vec<_> = release
+            .iter()
+            .filter(|name| name.as_str() != "probe_contact")
+            .cloned()
+            .collect();
+        let press_mask = resolve_buttons(&panel_press)?;
+        let release_mask = resolve_buttons(&panel_release)?;
         if press_mask & release_mask != 0 {
             return Err(DiagError::invalid_argument(
                 "a button cannot be pressed and released at once",
             ));
         }
         self.handle.set(|state| {
+            if probe_release {
+                state.remote_probe_until = None;
+            }
+            if probe_press {
+                state.remote_probe_until = Some(
+                    Instant::now() + Duration::from_millis(duration_ms.unwrap_or(1).clamp(1, 1000)),
+                );
+            }
             if release_mask != 0 {
                 state.buttons &= !release_mask;
                 state.holds.retain(|(held, _)| held & release_mask == 0);
@@ -578,7 +676,10 @@ impl SimPanelDriver {
             spindle_override: state.spindle_override,
             program_protect: state.program_protect,
             estop: state.estop,
-            probe: state.probe,
+            probe: state.probe
+                || state
+                    .remote_probe_until
+                    .is_some_and(|until| until > Instant::now()),
             home: [
                 home_active && rapid,
                 home_active && x && !self.last_display.homing,
@@ -3348,6 +3449,82 @@ mod tests {
         let snapshot = driver.poll().unwrap();
         assert_eq!(snapshot.buttons & buttons::CYCLE_START, 0);
         assert!(handle.snapshot().holds.is_empty());
+    }
+
+    #[test]
+    fn a_renewed_timed_hold_expires_after_its_latest_deadline() {
+        let mut state = SimPanelState::default();
+        let key = buttons::CYCLE_START;
+        state.press_for(key, Duration::from_secs(1));
+        let old_deadline = state.holds[0].1;
+        state.press_for(key, Duration::from_secs(2));
+        assert_eq!(state.holds.len(), 1);
+        assert!(state.holds[0].1 > old_deadline);
+        assert!(!state.release_expired_at(old_deadline));
+        assert_ne!(state.buttons & key, 0);
+        let new_deadline = state.holds[0].1;
+        assert!(state.release_expired_at(new_deadline));
+        assert_eq!(state.buttons & key, 0);
+    }
+
+    #[test]
+    fn expired_group_does_not_release_a_key_with_another_live_lease() {
+        let mut state = SimPanelState::default();
+        let x = buttons::JOG_XP;
+        let y = buttons::JOG_YP;
+        state.press_for(x | y, Duration::from_secs(1));
+        let first_deadline = state.holds[0].1;
+        state.press_for(x, Duration::from_secs(2));
+        assert!(state.release_expired_at(first_deadline));
+        assert_eq!(state.buttons & (x | y), x);
+        let second_deadline = state.holds[0].1;
+        assert!(state.release_expired_at(second_deadline));
+        assert_eq!(state.buttons & (x | y), 0);
+    }
+
+    #[test]
+    fn remote_probe_is_opt_in_bounded_and_released_by_timeout() {
+        let handle = SimPanelHandle::new();
+        let disabled = SimControlState::new(handle.clone());
+        let name = vec!["probe_contact".to_string()];
+        assert!(disabled.buttons(&name, &[], Some(20)).is_err());
+        let enabled = SimControlState::new_with_hal(handle.clone(), false, true);
+        assert!(enabled.buttons(&name, &[], None).is_err());
+        enabled.buttons(&name, &[], Some(20)).unwrap();
+        let mut driver = SimPanelDriver::new(handle.clone(), Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(3));
+        assert!(driver.poll().unwrap().probe);
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!driver.poll().unwrap().probe);
+        // The remote lease does not clear a local panel contact.
+        handle.set(|state| state.probe = true);
+        assert!(driver.poll().unwrap().probe);
+    }
+
+    #[test]
+    fn remote_power_key_matches_local_panel_and_reissues_pulses() {
+        let mut state = SimPanelState::default();
+        let on = SimPanelPatch {
+            power_key: Some("on".into()),
+            ..Default::default()
+        };
+        state.apply_patch(&on, 0, 0).unwrap();
+        assert!(state.power && !state.estop && state.power_on_pulse && !state.power_off_pulse);
+        state.power_on_pulse = false;
+        state.estop = true;
+        state.apply_patch(&on, 0, 0).unwrap();
+        assert!(state.power && !state.estop && state.power_on_pulse);
+        let off = SimPanelPatch {
+            power_key: Some("off".into()),
+            ..Default::default()
+        };
+        state.apply_patch(&off, 0, 0).unwrap();
+        assert!(!state.power && !state.power_on_pulse && state.power_off_pulse);
+        let invalid = SimPanelPatch {
+            power_key: Some("wrong".into()),
+            ..Default::default()
+        };
+        assert!(state.apply_patch(&invalid, 0, 0).is_err());
     }
 
     #[test]

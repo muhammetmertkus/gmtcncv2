@@ -14,6 +14,8 @@
 #   --float           float the HMI window under Hyprland at 1280x720
 #   --sim3d           add the 3D machine simulator (see below)
 #   --no-probe-key    hide the panel's PROBE CONTACT test key (see below)
+#   --embedded-panel  show the panel inside LiNC (default, simulation only)
+#   --external-panel  use the separate simulator panel window instead
 #
 # The simulated panel shows its PROBE CONTACT key by default: it asserts
 # motion.probe-input, which is how the probe wiring is checked by hand before
@@ -87,6 +89,7 @@ LOAD_PROGRAM=""
 FLOAT_WINDOW=0
 SIM3D=0
 PROBE_KEY=1
+EMBEDDED_PANEL=1
 READY_TIMEOUT="${LINC_READY_TIMEOUT:-60}"
 ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -108,6 +111,8 @@ while [[ $# -gt 0 ]]; do
         --sim3d) SIM3D=1 ;;
         --no-sim3d) SIM3D=0 ;;
         --no-probe-key) PROBE_KEY=0 ;;
+        --embedded-panel) EMBEDDED_PANEL=1 ;;
+        --external-panel) EMBEDDED_PANEL=0 ;;
         --timeout) READY_TIMEOUT="${2:?--timeout needs seconds}"; shift ;;
         *) ARGS+=("$1") ;;
     esac
@@ -173,6 +178,14 @@ if (( RELEASE_ESTOP )); then
     else
         export LINC_SIM_READY=estop
     fi
+fi
+
+if (( EMBEDDED_PANEL )); then
+    export LINC_EMBEDDED_PANEL_PREVIEW=1
+    export LINC_EMBEDDED_SIM_CONTROL=1
+    export LINC_EMBEDDED_PANEL_ONLY=1
+else
+    unset LINC_EMBEDDED_PANEL_PREVIEW LINC_EMBEDDED_SIM_CONTROL LINC_EMBEDDED_PANEL_ONLY
 fi
 
 export LINC_CONFIG="$PROFILE"
@@ -248,6 +261,24 @@ sim_ready() {
     if (( ${#args[@]} == 2 )); then
         return 0
     fi
+    # Do not open the NML channel before LinuxCNC has created its display.
+    # In the foreground path this function starts concurrently with linuxcnc;
+    # connecting earlier can attach to incomplete startup IPC and never recover.
+    local started=$SECONDS
+    local wait_seconds
+    if [[ "$READY_TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        wait_seconds=$((10#${READY_TIMEOUT%%.*} + 1))
+    else
+        echo "invalid timeout: $READY_TIMEOUT" >&2
+        return 1
+    fi
+    while [[ ! -s "$LINC_PID_FILE" ]] || ! kill -0 "$(cat "$LINC_PID_FILE" 2>/dev/null)" 2>/dev/null; do
+        if (( SECONDS - started >= wait_seconds )); then
+            echo "simulation display did not start within $READY_TIMEOUT seconds" >&2
+            return 1
+        fi
+        sleep 0.2
+    done
     python3 "$SCRIPT_DIR/sim-ready.py" "${args[@]}"
 }
 

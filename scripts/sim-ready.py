@@ -222,15 +222,15 @@ def leave_estop(linuxcnc, stat, command, timeout, settle):
     on the NML channel is queued and re-sent here, which takes the timing out
     of it.
     """
-    stat.poll()
-    if not stat.estop:
-        return
     # Give the session the moment it needs to have iocontrol, halui and the
     # panel all running before asking for anything: the reset sent during the
     # first HAL cycles is what the panel's own pulse loses.
     if settle > 0:
         log(f"waiting {settle:g} s for the session to settle")
         time.sleep(settle)
+    stat.poll()
+    if not stat.estop:
+        return
     deadline = time.monotonic() + timeout
     last_sent = 0.0
     attempt = 0

@@ -40,16 +40,63 @@ impl LincApp {
                     );
                     if self.is_sim() {
                         ui.add_space(4.0);
-                        let (rect, _) =
-                            ui.allocate_exact_size(Vec2::new(38.0, 18.0), Sense::hover());
-                        ui.painter().rect_filled(rect, 3, theme::WARNING);
+                        let is_open = self.sim_panel_should_show();
+                        let panel_pill_w = 58.0;
+                        let (rect, resp) =
+                            ui.allocate_exact_size(Vec2::new(panel_pill_w, 18.0), Sense::click());
+                        let hovered = resp.hovered();
+                        let bg = if is_open {
+                            if hovered {
+                                Color32::from_rgb(255, 175, 45)
+                            } else {
+                                theme::WARNING
+                            }
+                        } else if hovered {
+                            Color32::from_rgba_unmultiplied(65, 50, 20, 220)
+                        } else {
+                            Color32::from_rgba_unmultiplied(35, 28, 12, 180)
+                        };
+                        let text_col = if is_open {
+                            Color32::from_rgb(0x1a, 0x12, 0x04)
+                        } else {
+                            theme::WARNING
+                        };
+                        ui.painter().rect_filled(rect, 3, bg);
+                        ui.painter().rect_stroke(
+                            rect,
+                            3,
+                            egui::Stroke::new(1.0, theme::WARNING),
+                            egui::StrokeKind::Inside,
+                        );
+                        let icon_label = if is_open { "SIM ◨" } else { "SIM ◧" };
                         ui.painter().text(
                             rect.center(),
                             Align2::CENTER_CENTER,
-                            "SIM",
-                            FontId::monospace(theme::font_size(10.0)),
-                            Color32::from_rgb(0x1a, 0x12, 0x04),
+                            icon_label,
+                            FontId::monospace(theme::font_size(9.0)),
+                            text_col,
                         );
+                        if resp.clicked() {
+                            let is_operational = matches!(
+                                self.nav.page,
+                                crate::state::Page::Machine
+                                    | crate::state::Page::Manual
+                                    | crate::state::Page::Homing
+                                    | crate::state::Page::Offsets
+                                    | crate::state::Page::Probe
+                            );
+                            if is_operational {
+                                self.embedded_panel_visible = !self.embedded_panel_visible;
+                            } else {
+                                self.sim_panel_force_show = !self.sim_panel_force_show;
+                            }
+                        }
+                        let tip = if is_open {
+                            "Simülatör Operatör Panelini Gizle"
+                        } else {
+                            "Simülatör Operatör Panelini Göster"
+                        };
+                        resp.on_hover_text(tip);
                     }
                     ui.label(
                         RichText::new(self.profile.config.machine.name.clone())
@@ -166,6 +213,60 @@ impl LincApp {
                         "PANEL OFFLINE"
                     },
                 );
+
+                ui.add_space(16.0);
+                // Language switcher pills: [TR] / [EN]
+                let cur_loc = linc_core::i18n::current_locale();
+                let tr_active = cur_loc == linc_core::i18n::Locale::Tr;
+                let en_active = cur_loc == linc_core::i18n::Locale::En;
+
+                // In right_to_left layout, placing EN then TR renders visually as [TR] [EN]
+                let (en_rect, en_resp) = ui.allocate_exact_size(Vec2::new(26.0, 18.0), Sense::click());
+                if en_resp.clicked() {
+                    linc_core::i18n::set_locale(linc_core::i18n::Locale::En);
+                }
+                let en_bg = if en_active {
+                    theme::ACCENT
+                } else if en_resp.hovered() {
+                    theme::PANEL_RAISED
+                } else {
+                    theme::PANEL
+                };
+                let en_fg = if en_active {
+                    Color32::BLACK
+                } else {
+                    theme::MUTED
+                };
+                ui.painter().rect_filled(en_rect, 3, en_bg);
+                ui.painter().rect_stroke(en_rect, 3, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+                ui.painter().text(en_rect.center(), Align2::CENTER_CENTER, "EN", FontId::monospace(theme::font_size(10.0)), en_fg);
+                if en_resp.hovered() {
+                    en_resp.on_hover_text("English interface");
+                }
+
+                ui.add_space(4.0);
+                let (tr_rect, tr_resp) = ui.allocate_exact_size(Vec2::new(26.0, 18.0), Sense::click());
+                if tr_resp.clicked() {
+                    linc_core::i18n::set_locale(linc_core::i18n::Locale::Tr);
+                }
+                let tr_bg = if tr_active {
+                    theme::ACCENT
+                } else if tr_resp.hovered() {
+                    theme::PANEL_RAISED
+                } else {
+                    theme::PANEL
+                };
+                let tr_fg = if tr_active {
+                    Color32::BLACK
+                } else {
+                    theme::MUTED
+                };
+                ui.painter().rect_filled(tr_rect, 3, tr_bg);
+                ui.painter().rect_stroke(tr_rect, 3, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+                ui.painter().text(tr_rect.center(), Align2::CENTER_CENTER, "TR", FontId::monospace(theme::font_size(10.0)), tr_fg);
+                if tr_resp.hovered() {
+                    tr_resp.on_hover_text("Türkçe arayüz");
+                }
             });
         });
     }

@@ -141,15 +141,22 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    if args.allow_sim_control && !simulated {
+    // Explicit opt-in for the embedded simulator UI; it is ignored by the
+    // physical panel driver just like --allow-sim-control.
+    let allow_sim_control = args.allow_sim_control
+        || std::env::var_os("LINC_EMBEDDED_SIM_CONTROL").as_deref()
+            == Some(std::ffi::OsStr::new("1"));
+    if allow_sim_control && !simulated {
         log::warn!("--allow-sim-control ignored: this panel is not a simulator");
     }
     let sim_control: Option<Arc<dyn linc_diag::SimControl>> =
-        match (&sim_handle, args.allow_sim_control, simulated) {
+        match (&sim_handle, allow_sim_control, simulated) {
             (Some(handle), true, true) => {
                 log::warn!("simulator control armed for linc-mcp (--allow-sim-control)");
-                Some(Arc::new(linc_panel::sim::SimControlState::new(
+                Some(Arc::new(linc_panel::sim::SimControlState::new_with_hal(
                     handle.clone(),
+                    !args.no_hal,
+                    args.probe_key,
                 )))
             }
             _ => None,
@@ -285,8 +292,10 @@ fn run_simulated(
         handle.set(|state| state.apply_start(start));
     }
     let mut driver = linc_panel::SimPanelDriver::new(handle.clone(), cycle);
-    let show_window =
-        !no_window && (window || profile.config.simulation.panel_window.unwrap_or(false));
+    // This function is entered only for the simulator. Keep the panel service
+    // and HAL pins alive while its window is embedded in the HMI.
+    let embedded_only = std::env::var_os("LINC_EMBEDDED_PANEL_ONLY").as_deref() == Some(std::ffi::OsStr::new("1"));
+    let show_window = !embedded_only && !no_window && (window || profile.config.simulation.panel_window.unwrap_or(false));
     if show_window {
         let title = profile
             .config

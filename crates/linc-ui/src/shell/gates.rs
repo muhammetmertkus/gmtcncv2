@@ -385,7 +385,7 @@ impl LincApp {
             return;
         }
         if self.snapshot.program.path.is_none() {
-            self.toast("NO PROGRAM LOADED", theme::MUTED);
+            self.toast(linc_core::i18n::t("viewport.status.no_program"), theme::MUTED);
             return;
         }
         self.send(linc_core::command::MachineCommand::UnloadProgram);

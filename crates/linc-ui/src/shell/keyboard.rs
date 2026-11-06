@@ -801,11 +801,15 @@ impl LincApp {
         if self.nav.focus_region == FocusRegion::Nav {
             let mut activate = false;
             ui.input_mut(|input| {
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+                {
                     self.nav.nav_focus =
                         (self.nav.nav_focus + 1).min(self.nav.pages.len().saturating_sub(1));
                 }
-                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                    || input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+                {
                     self.nav.nav_focus = self.nav.nav_focus.saturating_sub(1);
                 }
                 if input.consume_key(

@@ -1,0 +1,41 @@
+# 5-Axis (XYZAB) Simulation Profile for LiNC
+
+schema_version = 1
+profile = "sim-5axis"
+extends = "base.toml"
+
+[machine]
+name = "LiNC 5-Eksen (XYZAB) Simülasyonu"
+kind = "sim"
+gui = "mill"
+linuxcnc_ini = "sim-5axis.ini"
+
+[mill]
+max_axes = 5
+
+[ui]
+window_title = "LiNC - 5 Eksen (X, Y, Z, A, B)"
+scale = "1.0"
+servo_load = ["X", "Y", "Z", "A", "B", "S"]
+keyboard = "pc"
+
+[panel]
+kind = "simulated"
+label = "Simulated CNC control panel"
+owner = "linc-panel"
+driver = "cnc-panel-sim"
+
+[panel.link]
+kind = "virtual"
+
+[diagnostics]
+panel_link_stats = "none"
+
+[simulation]
+enabled = true
+rio = "../hal/rio_sim.py"
+estop = "panel-gui"
+panel_window = true
+panel_title = "CNC Control Panel Simulator"
+panel_scale = 1.0
+

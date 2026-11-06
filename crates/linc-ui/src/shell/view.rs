@@ -74,6 +74,8 @@ impl LincApp {
         let valid = preview.error.is_none();
         if valid {
             self.program.last_valid_preview = preview.clone();
+            self.program.fit_requested = true;
+            self.program.graph_auto_fit = true;
         }
         self.program.preview = preview;
         self.program.preview_generation = self.program.preview_generation.wrapping_add(1);

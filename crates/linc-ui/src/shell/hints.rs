@@ -1,8 +1,8 @@
-//! The sidebar SHORTCUTS pane.
+//! Page-specific shortcut hints for the navigation menu.
 
 use super::*;
 
-/// One titled group of page-local keyboard commands shown in the sidebar.
+/// One titled group of page-local keyboard commands shown in the shortcuts menu.
 /// An empty title means the group has no header (most pages).
 pub(super) struct ShortcutGroup {
     pub(super) title: &'static str,
@@ -19,7 +19,7 @@ impl LincApp {
     }
 
     /// Keyboard commands available on the current page, grouped and titled for
-    /// the sidebar. Rendered as hints only — they are not buttons.
+    /// the shortcuts menu. Rendered as hints only — they are not buttons.
     pub(super) fn key_hints(&self) -> Vec<ShortcutGroup> {
         let k = &self.prefs.keymap;
         // The view toggles sit at the top of the pane so the display commands

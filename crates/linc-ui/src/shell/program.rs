@@ -138,6 +138,8 @@ impl LincApp {
             };
             self.program.graph_zoom = 1.0;
             self.program.graph_pan = Vec2::ZERO;
+            self.program.fit_requested = true;
+            self.program.graph_auto_fit = true;
             self.program.follow_current = true;
             self.program.focus_editor = false;
         }

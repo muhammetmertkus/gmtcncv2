@@ -1956,6 +1956,9 @@ pub struct GraphStyle {
     pub show_legend: bool,
     pub trail_max_points: usize,
     pub perspective: bool,
+    pub show_rapids: bool,
+    pub show_tool: bool,
+    pub show_workplane: bool,
 }
 
 impl GraphStyle {
@@ -1983,6 +1986,10 @@ impl GraphStyle {
         view.show_legend = self.show_legend;
         view.selected_line = selected_line;
         view.current_line = current_line;
+        view.show_rapids = self.show_rapids;
+        view.show_tool = self.show_tool;
+        view.show_workplane = self.show_workplane;
+        view.show_toggles = false;
     }
 }
 
@@ -2049,6 +2056,9 @@ pub fn graph_style(profile: &linc_core::config::Profile) -> GraphStyle {
         show_legend: true,
         trail_max_points: profile.config.toolpath.trail_max_points,
         perspective: profile.config.toolpath.perspective,
+        show_rapids: true,
+        show_tool: true,
+        show_workplane: true,
     }
 }
 /// How far the live trail must move to be drawn in the frame of the loaded

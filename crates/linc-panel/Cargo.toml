@@ -19,6 +19,7 @@ log.workspace = true
 serde_json.workspace = true
 serialport.workspace = true
 linc-core = { path = "../linc-core" }
+linc-view = { path = "../linc-view" }
 linc-diag = { path = "../linc-diag" }
 linc-hal = { path = "../linc-hal" }
 signal-hook.workspace = true

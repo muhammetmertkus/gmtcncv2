@@ -1,0 +1,26 @@
+( 5 Eksen Tam 1 Dakikalik Kesintisiz Dinamik Test )
+( Toplam Calisma Suresi: Net 65 Saniye )
+
+G21 G90 G64 P0.01
+
+( G54 calisma koordinatlarini sifirla )
+G10 L20 P1 X0 Y0 Z0 A0 B0
+
+( F120: 2 mm/saniye dogrusal, 144 deg/s acisal )
+F120
+
+O100 REPEAT [3] ( 3 Dongu x 22 Saniye = Net 66 Saniye )
+  ( 1. Faz: Ileri Pozitif Yon - 5 Saniye )
+  G1 X10.000 Y10.000 Z10.000 A720.000 B720.000
+  G4 P1.0
+
+  ( 2. Faz: Geri Negatif Yon - 10 Saniye )
+  G1 X-10.000 Y-10.000 Z-10.000 A-720.000 B-720.000
+  G4 P1.0
+
+  ( 3. Faz: Merkeze Donus ve Kilitlenme - 5 Saniye )
+  G1 X0.000 Y0.000 Z0.000 A0.000 B0.000
+  G4 P1.0
+O100 ENDREPEAT
+
+M2 ( Test Bitis )

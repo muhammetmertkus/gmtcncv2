@@ -300,6 +300,8 @@ pub struct SimPanelPatch {
     pub estop: Option<bool>,
     /// Simulation power state: `cnc_panel.power_on`, not the POWER ON key edge.
     pub power: Option<bool>,
+    /// Press the simulator's POWER ON or POWER OFF key (not a state assignment).
+    pub power_key: Option<String>,
     /// Button names from the panel table (`cycle_start`, `estop`, ...).
     pub press: Option<Vec<String>>,
     /// Button names to release.

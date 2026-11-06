@@ -1,0 +1,35 @@
+( 5 Eksen Canli Senkronizasyon Test Programi )
+( Tum 5 motor ayni anda kalkar, ayni hizda ilerler ve ayni anda durur )
+
+G21 ( Metrik sistem mm )
+G90 ( Mutlak koordinat )
+G64 P0.01 ( Yol toleransi hassas )
+
+( 1. Adim: Mevcut noktayi gecici sifir kabul et )
+G10 L20 P1 X0 Y0 Z0 A0 B0
+
+( Test Hizi: F120 birim/dakika = Saniyede 2 birim / devir )
+F120
+
+( --- TUR 1: Ileri Senkron Hareket --- )
+G1 X2.000 Y2.000 Z2.000 A360.000 B360.000
+G4 P0.5
+
+( --- TUR 1: Geri Senkron Hareket --- )
+G1 X0.000 Y0.000 Z0.000 A0.000 B0.000
+G4 P0.5
+
+( --- TUR 2: Hizli Senkron Hareket - F240 --- )
+F240
+G1 X3.000 Y3.000 Z3.000 A540.000 B540.000
+G4 P0.5
+G1 X0.000 Y0.000 Z0.000 A0.000 B0.000
+G4 P0.5
+
+( --- TUR 3: Capraz ve Salinim Testi --- )
+F180
+G1 X-2.000 Y-2.000 Z-2.000 A-360.000 B-360.000
+G4 P0.5
+G1 X0.000 Y0.000 Z0.000 A0.000 B0.000
+
+M2 ( Program Sonu )

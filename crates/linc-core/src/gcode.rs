@@ -716,6 +716,9 @@ pub struct ModalSummary {
     pub units: String,
     pub plane: String,
     pub distance_mode: String,
+    pub blend_mode: Option<String>,
+    pub blend_tolerance: Option<f64>,
+    pub naive_cam_tolerance: Option<f64>,
 }
 
 impl ModalSummary {
@@ -728,6 +731,182 @@ impl ModalSummary {
             lines.push((mcode.to_ascii_uppercase(), String::new()));
         }
         lines
+    }
+}
+
+/// A dwell pause (G4) visual marker in the 3D toolpath.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DwellMarker {
+    pub point: [f64; 3],
+    pub seconds: f64,
+    pub line: usize,
+}
+
+/// A workpiece raw stock solid declared in comments or setup.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkpieceStock {
+    Box {
+        min: [f64; 3],
+        max: [f64; 3],
+    },
+    Cylinder {
+        center: [f64; 3],
+        radius: f64,
+        height: f64,
+    },
+    Tube {
+        center: [f64; 3],
+        outer_radius: f64,
+        inner_radius: f64,
+        height: f64,
+    },
+}
+
+impl WorkpieceStock {
+    pub fn bounds(&self) -> Bounds3 {
+        match self {
+            Self::Box { min, max } => Bounds3 {
+                min: *min,
+                max: *max,
+            },
+            Self::Cylinder { center, radius, height } => Bounds3 {
+                min: [center[0] - radius, center[1] - radius, center[2]],
+                max: [center[0] + radius, center[1] + radius, center[2] + height],
+            },
+            Self::Tube { center, outer_radius, height, .. } => Bounds3 {
+                min: [center[0] - outer_radius, center[1] - outer_radius, center[2]],
+                max: [center[0] + outer_radius, center[1] + outer_radius, center[2] + height],
+            },
+        }
+    }
+}
+
+/// Parse a raw stock material comment such as `(WORKPIECE, BOX, ...)` or `(STOCK, ...)`.
+pub fn parse_workpiece_comment(comment: &str, active_unit_scale: f64) -> Option<WorkpieceStock> {
+    let clean = comment.trim_matches(|c| c == '(' || c == ')' || c == ';').trim();
+    let parts: Vec<&str> = clean.split(',').map(|s| s.trim()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let tag = parts[0].to_ascii_uppercase();
+    if tag != "WORKPIECE" && tag != "STOCK" {
+        return None;
+    }
+    let shape = parts[1].to_ascii_uppercase();
+
+    let mut keys: BTreeMap<String, f64> = BTreeMap::new();
+    let mut positional: Vec<f64> = Vec::new();
+    let mut unit_scale = active_unit_scale;
+
+    for part in &parts[2..] {
+        if let Some((k, v)) = part.split_once('=') {
+            let key = k.trim().to_ascii_uppercase();
+            let val = v.trim();
+            if key == "UNITS" {
+                if val.eq_ignore_ascii_case("INCH") || val.eq_ignore_ascii_case("INCHES") {
+                    unit_scale = 25.4;
+                } else if val.eq_ignore_ascii_case("MM") {
+                    unit_scale = 1.0;
+                }
+            } else if let Ok(num) = val.parse::<f64>() {
+                keys.insert(key, num);
+            }
+        } else if let Ok(num) = part.parse::<f64>() {
+            positional.push(num);
+        }
+    }
+
+    match shape.as_str() {
+        "BOX" => {
+            if let (Some(&xmin), Some(&ymin), Some(&zmin), Some(&xmax), Some(&ymax), Some(&zmax)) = (
+                keys.get("XMIN"),
+                keys.get("YMIN"),
+                keys.get("ZMIN"),
+                keys.get("XMAX"),
+                keys.get("YMAX"),
+                keys.get("ZMAX"),
+            ) {
+                return Some(WorkpieceStock::Box {
+                    min: [xmin * unit_scale, ymin * unit_scale, zmin * unit_scale],
+                    max: [xmax * unit_scale, ymax * unit_scale, zmax * unit_scale],
+                });
+            }
+            if let (Some(&dx), Some(&dy), Some(&dz)) = (keys.get("DX"), keys.get("DY"), keys.get("DZ")) {
+                let x0 = keys.get("X").copied().unwrap_or(0.0);
+                let y0 = keys.get("Y").copied().unwrap_or(0.0);
+                let z0 = keys.get("Z").copied().unwrap_or(-dz);
+                return Some(WorkpieceStock::Box {
+                    min: [x0 * unit_scale, y0 * unit_scale, z0 * unit_scale],
+                    max: [(x0 + dx) * unit_scale, (y0 + dy) * unit_scale, (z0 + dz) * unit_scale],
+                });
+            }
+            if positional.len() >= 6 {
+                return Some(WorkpieceStock::Box {
+                    min: [
+                        positional[0] * unit_scale,
+                        positional[1] * unit_scale,
+                        positional[2] * unit_scale,
+                    ],
+                    max: [
+                        positional[3] * unit_scale,
+                        positional[4] * unit_scale,
+                        positional[5] * unit_scale,
+                    ],
+                });
+            }
+            if positional.len() >= 3 {
+                let dx = positional[0] * unit_scale;
+                let dy = positional[1] * unit_scale;
+                let dz = positional[2] * unit_scale;
+                return Some(WorkpieceStock::Box {
+                    min: [-dx * 0.5, -dy * 0.5, -dz],
+                    max: [dx * 0.5, dy * 0.5, 0.0],
+                });
+            }
+            None
+        }
+        "CYLINDER" | "TUBE" => {
+            let cx = keys.get("X").copied().unwrap_or(0.0) * unit_scale;
+            let cy = keys.get("Y").copied().unwrap_or(0.0) * unit_scale;
+            let zmin = keys.get("ZMIN").copied().unwrap_or(0.0) * unit_scale;
+            let zmax = keys.get("ZMAX").copied().unwrap_or(0.0) * unit_scale;
+            let radius = if let Some(&od) = keys.get("OD") {
+                od * 0.5 * unit_scale
+            } else if let Some(&r) = keys.get("R") {
+                r * unit_scale
+            } else if let Some(&dia) = keys.get("D") {
+                dia * 0.5 * unit_scale
+            } else if !positional.is_empty() {
+                positional[0] * 0.5 * unit_scale
+            } else {
+                25.0
+            };
+            let height = (zmax - zmin).abs().max(1.0);
+            let inner_radius = if let Some(&id) = keys.get("ID") {
+                Some(id * 0.5 * unit_scale)
+            } else if positional.len() >= 2 && shape == "TUBE" {
+                Some(positional[1] * 0.5 * unit_scale)
+            } else {
+                None
+            };
+
+            if shape == "TUBE" || inner_radius.is_some() {
+                let ir = inner_radius.unwrap_or(radius * 0.5);
+                Some(WorkpieceStock::Tube {
+                    center: [cx, cy, zmin.min(zmax)],
+                    outer_radius: radius,
+                    inner_radius: ir.min(radius - 0.1),
+                    height,
+                })
+            } else {
+                Some(WorkpieceStock::Cylinder {
+                    center: [cx, cy, zmin.min(zmax)],
+                    radius,
+                    height,
+                })
+            }
+        }
+        _ => None,
     }
 }
 
@@ -770,6 +949,14 @@ pub struct Preview {
     /// loop". A nested program re-enters the same few stacks, so the table
     /// stays small while every segment still names its whole nest.
     pub loop_stacks: Vec<Vec<(u32, u32)>>,
+    /// G64 / G61 trajectory blending mode
+    pub blend_mode: Option<String>,
+    /// G64 blending path tolerance in mm
+    pub blend_tolerance: Option<f64>,
+    /// Dwell (G4) pause markers along the path
+    pub dwells: Vec<DwellMarker>,
+    /// Workpiece raw stock material envelope parsed from (WORKPIECE,...) comments
+    pub workpiece: Option<WorkpieceStock>,
 }
 
 /// A loop the program runs, as the preview saw it.
@@ -995,6 +1182,10 @@ impl Preview {
             loops: Vec::new(),
             segment_loop: Vec::new(),
             loop_stacks: vec![Vec::new()],
+            blend_mode: None,
+            blend_tolerance: None,
+            dwells: Vec::new(),
+            workpiece: None,
         }
     }
 
@@ -1062,6 +1253,196 @@ impl Preview {
             }
         }
         bounds
+    }
+
+    /// Calculate total length of all rapid (G0) segments in mm.
+    pub fn rapid_distance(&self) -> f64 {
+        self.segments
+            .iter()
+            .filter(|s| s.kind == SegmentKind::Rapid)
+            .map(segment_length)
+            .sum()
+    }
+
+    /// Calculate total length of all cutting (G1, G2, G3) and feed moves in mm.
+    pub fn cut_distance(&self) -> f64 {
+        self.segments
+            .iter()
+            .filter(|s| s.kind != SegmentKind::Rapid)
+            .map(segment_length)
+            .sum()
+    }
+
+    /// Estimated cycle time in seconds using given feed rate and rapid speed in mm/min.
+    pub fn estimated_time_secs(&self, default_feed_mmpm: f64, rapid_speed_mmpm: f64) -> f64 {
+        let rapid_dist = self.rapid_distance();
+        let cut_dist = self.cut_distance();
+        let rapid_speed = (rapid_speed_mmpm.max(100.0)) / 60.0;
+        let cut_speed = (default_feed_mmpm.max(10.0)) / 60.0;
+        (rapid_dist / rapid_speed) + (cut_dist / cut_speed)
+    }
+
+    /// Smooths sharp corners between contiguous linear feed segments according
+    /// to LinuxCNC G64 trajectory blending tolerance `tolerance` (mm).
+    ///
+    /// For each consecutive pair of Feed moves that form a corner with turning
+    /// angle between 5° and 175°, this rounds the vertex with a constant-acceleration
+    /// parabolic fillet (quadratic Bézier blend) whose peak deviation from the
+    /// vertex does not exceed `tolerance`.
+    pub fn apply_corner_blending(&mut self, tolerance: f64) {
+        if tolerance <= 1e-6 || self.segments.len() < 2 {
+            return;
+        }
+
+        let n = self.segments.len();
+        // Joint info: (blend_start_point, blend_end_point, apex_point, line_no, tool)
+        let mut joints: Vec<Option<([f64; 3], [f64; 3], [f64; 3], usize, Option<u16>)>> = vec![None; n];
+
+        for i in 0..(n - 1) {
+            let seg_a = &self.segments[i];
+            let seg_b = &self.segments[i + 1];
+
+            // Only blend between linear Feed moves that meet at a point
+            if seg_a.kind != SegmentKind::Feed
+                || seg_b.kind != SegmentKind::Feed
+                || seg_a.arc.is_some()
+                || seg_b.arc.is_some()
+            {
+                continue;
+            }
+
+            let p0 = seg_a.start;
+            let p1 = seg_a.end;
+            let p2 = seg_b.end;
+
+            // Ensure seg_a.end meets seg_b.start
+            let gap_sq = (p1[0] - seg_b.start[0]).powi(2)
+                + (p1[1] - seg_b.start[1]).powi(2)
+                + (p1[2] - seg_b.start[2]).powi(2);
+            if gap_sq > 1e-8 {
+                continue;
+            }
+
+            let v1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let v2 = [p2[0] - p1[0], p2[1] - p1[1], p2[2] - p1[2]];
+            let l1 = (v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]).sqrt();
+            let l2 = (v2[0] * v2[0] + v2[1] * v2[1] + v2[2] * v2[2]).sqrt();
+
+            if l1 < 1e-5 || l2 < 1e-5 {
+                continue;
+            }
+
+            let u1 = [v1[0] / l1, v1[1] / l1, v1[2] / l1];
+            let u2 = [v2[0] / l2, v2[1] / l2, v2[2] / l2];
+
+            let dot = (u1[0] * u2[0] + u1[1] * u2[1] + u1[2] * u2[2]).clamp(-1.0, 1.0);
+
+            // Don't blend straight moves (dot > 0.9998) or full reversals (dot < -0.9998)
+            if dot > 0.9998 || dot < -0.9998 {
+                continue;
+            }
+
+            // Corner turning angle theta and internal corner angle gamma
+            let theta = dot.acos();
+            let gamma = std::f64::consts::PI - theta;
+            let half_gamma = (gamma * 0.5).max(0.01);
+
+            let sin_half = half_gamma.sin();
+            let cos_half = half_gamma.cos();
+
+            // Tangent distance from vertex along each segment for fillet with deviation <= tolerance
+            let denom = (1.0 - sin_half).max(0.01);
+            let mut t_dist = (tolerance * cos_half) / denom;
+
+            // Clamp blend to at most 40% of either segment so adjacent blends never overlap
+            let max_t = 0.40 * l1.min(l2);
+            t_dist = t_dist.min(max_t);
+
+            if t_dist < 1e-5 {
+                continue;
+            }
+
+            let p_start = [
+                p1[0] - u1[0] * t_dist,
+                p1[1] - u1[1] * t_dist,
+                p1[2] - u1[2] * t_dist,
+            ];
+            let p_end = [
+                p1[0] + u2[0] * t_dist,
+                p1[1] + u2[1] * t_dist,
+                p1[2] + u2[2] * t_dist,
+            ];
+
+            joints[i] = Some((p_start, p_end, p1, seg_b.line, seg_b.tool));
+        }
+
+        // Assemble the new segment list with blended corner chords
+        let mut new_segments = Vec::with_capacity(self.segments.len() * 2);
+        let mut new_segment_loop = Vec::with_capacity(self.segments.len() * 2);
+
+        for (i, seg) in self.segments.iter().enumerate() {
+            let mut seg_copy = seg.clone();
+            let loop_tag = self.segment_loop.get(i).copied().unwrap_or(0);
+
+            // If incoming joint modified the start of this segment
+            if i > 0 {
+                if let Some((_, p_end, _, _, _)) = joints[i - 1] {
+                    seg_copy.start = p_end;
+                }
+            }
+
+            // If outgoing joint modifies the end of this segment
+            if let Some((p_start, _, _, _, _)) = joints[i] {
+                seg_copy.end = p_start;
+            }
+
+            // Push the linear segment body (if it has non-zero length)
+            let len_sq = (seg_copy.end[0] - seg_copy.start[0]).powi(2)
+                + (seg_copy.end[1] - seg_copy.start[1]).powi(2)
+                + (seg_copy.end[2] - seg_copy.start[2]).powi(2);
+            if len_sq > 1e-10 {
+                new_segments.push(seg_copy);
+                new_segment_loop.push(loop_tag);
+            }
+
+            // If this joint has a blend, insert the smooth blend chords
+            if let Some((p_start, p_end, p_ctrl, line_no, tool)) = joints[i] {
+                const BLEND_STEPS: usize = 4;
+                let mut prev_pt = p_start;
+                for step in 1..=BLEND_STEPS {
+                    let t = step as f64 / BLEND_STEPS as f64;
+                    let one_minus_t = 1.0 - t;
+                    // Quadratic Bézier blend curve: B(t) = (1-t)^2 P0 + 2(1-t)t P1 + t^2 P2
+                    let pt = [
+                        one_minus_t * one_minus_t * p_start[0] + 2.0 * one_minus_t * t * p_ctrl[0] + t * t * p_end[0],
+                        one_minus_t * one_minus_t * p_start[1] + 2.0 * one_minus_t * t * p_ctrl[1] + t * t * p_end[1],
+                        one_minus_t * one_minus_t * p_start[2] + 2.0 * one_minus_t * t * p_ctrl[2] + t * t * p_end[2],
+                    ];
+                    new_segments.push(PathSegment {
+                        start: prev_pt,
+                        end: pt,
+                        kind: SegmentKind::Feed,
+                        line: line_no,
+                        arc: None,
+                        tool,
+                    });
+                    new_segment_loop.push(loop_tag);
+                    prev_pt = pt;
+                }
+            }
+        }
+
+        self.segments = new_segments;
+        self.segment_loop = new_segment_loop;
+        // Rebuild line bounds and extents
+        self.line_bounds.clear();
+        for (idx, seg) in self.segments.iter().enumerate() {
+            self.line_bounds
+                .entry(seg.line)
+                .and_modify(|(_, end)| *end = idx + 1)
+                .or_insert((idx, idx + 1));
+        }
+        self.bounds = Bounds3::from_segments(&self.segments);
     }
 }
 
@@ -1442,7 +1823,11 @@ fn push_cycle_segment(
     line: usize,
     tool: Option<u16>,
     pass: u32,
+    suppressed: bool,
 ) {
+    if suppressed {
+        return;
+    }
     if kind == SegmentKind::Rapid {
         preview.rapids += 1;
     }
@@ -3670,6 +4055,22 @@ fn parse_statements(text: &str) -> (Vec<Stmt>, Vec<Option<String>>, Option<Synta
         let code = strip_comments(raw);
         let trimmed = code.trim();
         if trimmed.is_empty() {
+            let raw_trimmed = raw.trim();
+            if !raw_trimmed.is_empty() {
+                let upper = raw_trimmed.to_ascii_uppercase();
+                if upper.contains("AXIS,")
+                    || upper.contains("PREVIEW,")
+                    || upper.contains("WORKPIECE,")
+                    || upper.contains("STOCK,")
+                {
+                    statements.push(Stmt::Block {
+                        line,
+                        raw: raw.to_string(),
+                        tokens: lex_line(raw),
+                    });
+                    labels.push(None);
+                }
+            }
             continue;
         }
         if let Some((label, rest)) = o_word(trimmed) {
@@ -4534,6 +4935,9 @@ pub fn parse_preview_full(
     let mut comp_radius_unknown: Option<(usize, u16)> = None;
     // G98 (initial Z) is the default retract mode; G99 retracts to R.
     let mut retract_to_r = false;
+    let mut blend_mode: Option<String> = None;
+    let mut blend_tolerance: Option<f64> = None;
+    let mut naive_cam_tolerance: Option<f64> = None;
 
     // Execution order, not file order: an o-word program calls, loops and
     // branches, so the drawn path is what the blocks do when they run.
@@ -4558,6 +4962,7 @@ pub fn parse_preview_full(
     preview.loops = loops;
     preview.loop_stacks = loop_stacks;
     let total_lines = text.lines().count();
+    let mut axis_suppress: usize = 0;
 
     for block in blocks {
         let line_no = block.line;
@@ -4568,6 +4973,40 @@ pub fn parse_preview_full(
         if tokens.is_empty() {
             continue;
         }
+
+        // Parse comments for AXIS/PREVIEW directives: (AXIS,hide), (AXIS,show), (AXIS,stop), (WORKPIECE,...)
+        let mut axis_stop_hit = false;
+        let mut is_dwell: Option<f64> = None;
+        for token in &tokens {
+            if token.kind == TokenKind::Comment {
+                let clean = token.text.trim_matches(|c| c == '(' || c == ')' || c == ';').trim();
+                let upper = clean.to_ascii_uppercase();
+                if upper.starts_with("AXIS,") || upper.starts_with("PREVIEW,") {
+                    let parts: Vec<&str> = upper.split(',').map(|s| s.trim()).collect();
+                    if parts.len() > 1 {
+                        match parts[1] {
+                            "HIDE" => axis_suppress += 1,
+                            "SHOW" => axis_suppress = axis_suppress.saturating_sub(1),
+                            "STOP" => {
+                                axis_stop_hit = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if upper.starts_with("WORKPIECE,") || upper.starts_with("STOCK,") {
+                    let active_scale = if units == "G20" { 25.4 } else { 1.0 };
+                    if let Some(stock) = parse_workpiece_comment(clean, active_scale) {
+                        preview.workpiece = Some(stock);
+                    }
+                }
+            }
+        }
+        if axis_stop_hit {
+            break;
+        }
+
         let line_start_segment = preview.segments.len();
         // Set by a G10 in this block: the block writes an offset, it never moves.
         let mut g10 = false;
@@ -4598,7 +5037,9 @@ pub fn parse_preview_full(
         for token in &tokens {
             if token.kind == TokenKind::GCode {
                 if let Some(value) = parse_number(&token.text[1..]) {
-                    if value == 0.0 || value == 1.0 || value == 2.0 || value == 3.0 {
+                    if value == 4.0 {
+                        is_dwell = Some(word_value(&tokens, 'p').unwrap_or(0.0));
+                    } else if value == 0.0 || value == 1.0 || value == 2.0 || value == 3.0 {
                         motion = value;
                         // Any ordinary motion mode cancels a canned cycle.
                         drill_cycle = None;
@@ -4697,6 +5138,21 @@ pub fn parse_preview_full(
                         probe = Some(value);
                     } else if value == 53.0 {
                         machine_coordinates = true;
+                    } else if value == 64.0 {
+                        blend_mode = Some("G64".to_string());
+                        let scale = if units == "G20" { 25.4 } else { 1.0 };
+                        if let Some(p) = word_value(&tokens, 'p') {
+                            blend_tolerance = Some(p * scale);
+                        }
+                        if let Some(q) = word_value(&tokens, 'q') {
+                            naive_cam_tolerance = Some(q * scale);
+                        }
+                    } else if value == 61.0 {
+                        blend_mode = Some("G61".to_string());
+                        blend_tolerance = Some(0.0);
+                    } else if value == 61.1 {
+                        blend_mode = Some("G61.1".to_string());
+                        blend_tolerance = Some(0.0);
                     }
                 }
             } else if token.kind == TokenKind::MCode {
@@ -4706,6 +5162,14 @@ pub fn parse_preview_full(
                     }
                 }
             }
+        }
+
+        if let Some(dwell_sec) = is_dwell {
+            preview.dwells.push(DwellMarker {
+                point: position,
+                seconds: dwell_sec,
+                line: line_no,
+            });
         }
 
         // G20 words are inches; every other length in this function is a
@@ -4915,7 +5379,7 @@ pub fn parse_preview_full(
             let mut at = [drive_x, y, start_z];
             let cut = |preview: &mut Preview, from: [f64; 3], to: [f64; 3], kind| {
                 if (to[2] - from[2]).abs() > 1e-12 || (to[0] - from[0]).abs() > 1e-12 {
-                    push_cycle_segment(preview, from, to, kind, line_no, tool, pass);
+                    push_cycle_segment(preview, from, to, kind, line_no, tool, pass, axis_suppress > 0);
                 }
             };
             // The thread is cut in passes: `J` is the first cut's depth and `K`
@@ -5113,6 +5577,7 @@ pub fn parse_preview_full(
                             line_no,
                             tool,
                             pass,
+                            axis_suppress > 0,
                         );
                         position[2] = r;
                     }
@@ -5127,6 +5592,7 @@ pub fn parse_preview_full(
                             line_no,
                             tool,
                             pass,
+                            axis_suppress > 0,
                         );
                         position[0] = hole[0];
                         position[1] = hole[1];
@@ -5141,6 +5607,7 @@ pub fn parse_preview_full(
                             line_no,
                             tool,
                             pass,
+                            axis_suppress > 0,
                         );
                         position[2] = r;
                     }
@@ -5154,6 +5621,7 @@ pub fn parse_preview_full(
                             line_no,
                             tool,
                             pass,
+                            axis_suppress > 0,
                         );
                         position[2] = depth;
                     }
@@ -5173,6 +5641,7 @@ pub fn parse_preview_full(
                             line_no,
                             tool,
                             pass,
+                            axis_suppress > 0,
                         );
                     }
                     position = [hole[0], hole[1], clear];
@@ -5344,7 +5813,7 @@ pub fn parse_preview_full(
             let mut at = position;
             for point in chords.into_iter().skip(1) {
                 let to = [point[0], point[1], target[2]];
-                push_cycle_segment(&mut preview, at, to, SegmentKind::Feed, line_no, tool, pass);
+                push_cycle_segment(&mut preview, at, to, SegmentKind::Feed, line_no, tool, pass, axis_suppress > 0);
                 at = to;
             }
             preview
@@ -5466,7 +5935,7 @@ pub fn parse_preview_full(
         // A G28/G30 with no axis words moves straight to the reference position:
         // it names no point of its own to pass through, so only the move to the
         // reference position is drawn.
-        if home.is_none() || has_axis_word {
+        if (home.is_none() || has_axis_word) && axis_suppress == 0 {
             preview.segments.push(segment);
             preview.segment_loop.push(pass);
             preview
@@ -5505,6 +5974,7 @@ pub fn parse_preview_full(
                     line_no,
                     tool,
                     pass,
+                    axis_suppress > 0,
                 );
                 preview
                     .line_bounds
@@ -5530,6 +6000,16 @@ pub fn parse_preview_full(
     // cannot give it. Walk the drawn segments once and record one pass's seam,
     // heading and size for each such loop.
     attach_loop_paths(&mut preview);
+
+    // G64 trajectory blending: if a tolerance was commanded, round sharp corners
+    // between linear feed moves, matching LinuxCNC's parabolic trajectory planner.
+    if let Some(tol) = blend_tolerance {
+        if tol > 1e-5 {
+            preview.apply_corner_blending(tol);
+        }
+    }
+    preview.blend_mode = blend_mode.clone();
+    preview.blend_tolerance = blend_tolerance;
 
     preview.line_count = total_lines;
     if preview.error.is_none() {
@@ -5584,6 +6064,9 @@ pub fn parse_preview_full(
             if let Some(active) = comp {
                 codes.push(if active.left { "G41" } else { "G42" }.to_string());
             }
+            if let Some(ref mode) = blend_mode {
+                codes.push(mode.clone());
+            }
             codes
         },
         mcodes: preview.modal.mcodes.clone(),
@@ -5601,6 +6084,9 @@ pub fn parse_preview_full(
             Plane::Vw => "G19.1".into(),
         },
         distance_mode: if absolute { "G90".into() } else { "G91".into() },
+        blend_mode,
+        blend_tolerance,
+        naive_cam_tolerance,
     };
     // The lathe diameter mode the last block left behind, which the DRO reads so
     // a program written in diameters is shown in diameters.
@@ -5793,7 +6279,7 @@ fn segment_heading(segment: &PathSegment) -> Option<[f64; 3]> {
     (length > 1e-9).then(|| [delta[0] / length, delta[1] / length, delta[2] / length])
 }
 
-fn segment_length(segment: &PathSegment) -> f64 {
+pub fn segment_length(segment: &PathSegment) -> f64 {
     let Some(arc) = &segment.arc else {
         return ((segment.end[0] - segment.start[0]).powi(2)
             + (segment.end[1] - segment.start[1]).powi(2)
@@ -5893,6 +6379,42 @@ pub fn find_in_text(text: &str, needle: &str) -> Option<(usize, usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_calculates_distance_and_cycle_time() {
+        let text = "G21 G90\nG0 X0 Y0 Z10\nG0 Z2\nG1 Z-5 F500\nG1 X100 Y0 F1000\nG1 Y50\nG0 Z10\n";
+        let preview = parse_preview(text, &["X".into(), "Y".into(), "Z".into()], None, [0.0; 3]);
+        let rapid = preview.rapid_distance();
+        let cut = preview.cut_distance();
+        assert!(rapid > 0.0, "rapid distance should be positive, got {rapid}");
+        assert!(cut > 0.0, "cut distance should be positive, got {cut}");
+        let time = preview.estimated_time_secs(1000.0, 5000.0);
+        assert!(time > 0.0, "estimated time should be positive, got {time}");
+    }
+
+    #[test]
+    fn g64_trajectory_blending_rounds_sharp_corners_within_tolerance() {
+        let exact_text = "G21 G90 G61\nG1 X0 Y0 F500\nG1 X50 Y0\nG1 X50 Y50\n";
+        let exact = parse_preview(exact_text, &["X".into(), "Y".into(), "Z".into()], None, [0.0; 3]);
+        assert_eq!(exact.modal.blend_mode.as_deref(), Some("G61"));
+        assert_eq!(exact.modal.blend_tolerance, Some(0.0));
+        assert_eq!(exact.segments.len(), 3);
+
+        let blend_text = "G21 G90 G64 P2.0\nG1 X0 Y0 F500\nG1 X50 Y0\nG1 X50 Y50\n";
+        let blended = parse_preview(blend_text, &["X".into(), "Y".into(), "Z".into()], None, [0.0; 3]);
+        assert_eq!(blended.modal.blend_mode.as_deref(), Some("G64"));
+        assert_eq!(blended.modal.blend_tolerance, Some(2.0));
+        assert!(blended.segments.len() > 3, "expected blend chords, got {}", blended.segments.len());
+        for seg in &blended.segments {
+            assert!(seg.start[0] <= 50.001);
+            assert!(seg.end[0] <= 50.001);
+        }
+        let reached_sharp_apex = blended.segments.iter().any(|s| {
+            (s.start[0] - 50.0).abs() < 1e-3 && s.start[1].abs() < 1e-3
+                || (s.end[0] - 50.0).abs() < 1e-3 && s.end[1].abs() < 1e-3
+        });
+        assert!(!reached_sharp_apex, "sharp apex should be filleted by G64 blend");
+    }
 
     #[test]
     fn lexer_classifies_words_and_keeps_comments() {
@@ -8358,5 +8880,71 @@ mod tests {
             [0.0; 3],
         );
         assert!(!preview.incomplete, "{:?}", preview.incomplete_reason);
+    }
+
+    #[test]
+    fn axis_hide_suppresses_moves_and_axis_show_restores_them() {
+        let text = "G21 G90\nG0 X0 Y0\nG1 X10 F500\n(AXIS,hide)\nG1 X50\nG0 X60\n(AXIS,show)\nG1 X70\nM2\n";
+        let preview = parse_preview(text, &preview_axes(), None, [0.0; 3]);
+        // G0 X0, G1 X10, and G1 X70 should be drawn; lines 5 (X50) and 6 (X60) are hidden
+        assert_eq!(preview.segments.len(), 3);
+        assert_eq!(preview.segments[1].end[0], 10.0);
+        assert_eq!(preview.segments[2].start[0], 60.0);
+        assert_eq!(preview.segments[2].end[0], 70.0);
+    }
+
+    #[test]
+    fn axis_stop_halts_further_preview_parsing() {
+        let text = "G21 G90\nG0 X0 Y0\nG1 X10 F500\n(AXIS,stop)\nG1 X50\nG1 X100\n";
+        let preview = parse_preview(text, &preview_axes(), None, [0.0; 3]);
+        // Only G0 X0 and G1 X10 are parsed; subsequent lines are halted by (AXIS,stop)
+        assert_eq!(preview.segments.len(), 2);
+        assert_eq!(preview.segments[1].end[0], 10.0);
+    }
+
+    #[test]
+    fn g4_dwell_marker_is_recorded_with_position_and_duration() {
+        let text = "G21 G90\nG0 X15 Y25 Z5\nG4 P2.5\nG1 Z-2 F200\n";
+        let preview = parse_preview(text, &preview_axes(), None, [0.0; 3]);
+        assert_eq!(preview.dwells.len(), 1);
+        assert_eq!(preview.dwells[0].seconds, 2.5);
+        assert_eq!(preview.dwells[0].point, [15.0, 25.0, 5.0]);
+        assert_eq!(preview.dwells[0].line, 3);
+    }
+
+    #[test]
+    fn workpiece_comment_parses_box_and_cylinder_stock() {
+        let box_text = "G21\n(WORKPIECE, BOX, XMIN=-50, YMIN=-30, ZMIN=-15, XMAX=50, YMAX=30, ZMAX=0)\nG1 X10\n";
+        let preview_box = parse_preview(box_text, &preview_axes(), None, [0.0; 3]);
+        assert!(matches!(
+            preview_box.workpiece,
+            Some(WorkpieceStock::Box {
+                min: [-50.0, -30.0, -15.0],
+                max: [50.0, 30.0, 0.0]
+            })
+        ));
+
+        let cyl_text = "G21\n(WORKPIECE, CYLINDER, X=10, Y=20, ZMIN=-25, ZMAX=0, OD=60)\nG1 X10\n";
+        let preview_cyl = parse_preview(cyl_text, &preview_axes(), None, [0.0; 3]);
+        assert!(matches!(
+            preview_cyl.workpiece,
+            Some(WorkpieceStock::Cylinder {
+                center: [10.0, 20.0, -25.0],
+                radius,
+                height: 25.0
+            }) if (radius - 30.0).abs() < 1e-6
+        ));
+
+        let tube_text = "G21\n(WORKPIECE, TUBE, X=0, Y=0, ZMIN=-40, ZMAX=0, OD=80, ID=50)\nG1 X10\n";
+        let preview_tube = parse_preview(tube_text, &preview_axes(), None, [0.0; 3]);
+        assert!(matches!(
+            preview_tube.workpiece,
+            Some(WorkpieceStock::Tube {
+                center: [0.0, 0.0, -40.0],
+                outer_radius,
+                inner_radius,
+                height: 40.0
+            }) if (outer_radius - 40.0).abs() < 1e-6 && (inner_radius - 25.0).abs() < 1e-6
+        ));
     }
 }

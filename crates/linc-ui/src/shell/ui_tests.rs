@@ -331,33 +331,6 @@ fn escaping_the_safety_notice_quits_without_accepting() {
     drop(dir);
 }
 
-/// The sidebar SHORTCUTS frame: the only 4 px-corner pane in the nav
-/// column. Its rect, so a test can see how tall the pane came out.
-fn shortcuts_frame(output: &egui::FullOutput) -> Option<egui::Rect> {
-    fn walk(shape: &egui::Shape, out: &mut Vec<egui::Rect>) {
-        match shape {
-            egui::Shape::Rect(rect) => {
-                if rect.fill == theme::PANEL && rect.corner_radius.nw == 4 {
-                    out.push(rect.rect);
-                }
-            }
-            egui::Shape::Vec(shapes) => {
-                for shape in shapes {
-                    walk(shape, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut rects = Vec::new();
-    for clipped in &output.shapes {
-        walk(&clipped.shape, &mut rects);
-    }
-    rects
-        .into_iter()
-        .find(|rect| rect.left() < theme::NAV_WIDTH)
-}
-
 /// The bottom bar reads the overrides in the physical panel's order:
 /// FEED, RAPID, SPINDLE. The old format printed the spindle value in the
 /// RAPID slot and the rapid value in the SPINDLE slot.
@@ -844,6 +817,7 @@ fn the_following_error_numbers_ignore_rapids() {
 #[test]
 fn the_square_key_shows_the_following_error_traces_on_main() {
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.show_dro_cards = true;
     harness.app.set_page(Page::Machine);
     let texts = |harness: &mut ProbeHarness| -> Vec<String> {
         painted_text(&harness.frame_full(Vec::new()))
@@ -900,6 +874,7 @@ fn the_square_key_shows_the_following_error_traces_on_main() {
 #[test]
 fn remaining_is_announced_in_the_toolpath_header() {
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.show_dro_cards = true;
     harness.app.set_page(Page::Machine);
     let header = |harness: &mut ProbeHarness| -> Vec<(String, egui::Rect)> {
         painted_text(&harness.frame_full(Vec::new()))
@@ -910,14 +885,14 @@ fn remaining_is_announced_in_the_toolpath_header() {
     assert!(
         !header(&mut harness)
             .iter()
-            .any(|(text, _)| text == "REMAINING"),
+            .any(|(text, _)| text == "REMAINING" || text == "KALAN YOL"),
         "no indicator with the mode off"
     );
     harness.app.graph_style.remaining = true;
     assert!(
         header(&mut harness)
             .iter()
-            .any(|(text, _)| text == "REMAINING"),
+            .any(|(text, _)| text == "REMAINING" || text == "KALAN YOL"),
         "the card header says REMAINING while it is on"
     );
 }
@@ -1261,11 +1236,7 @@ fn the_navigation_rows_are_tight_and_the_pill_fills_them() {
     assert!(theme::NAV_ROW_HEIGHT < theme::MIN_TARGET);
 }
 
-/// Measured at 1280x720, from the frame's own shapes: six rows, four primary
-/// pills of 26 px and two one-line pills of 20 px. DIAGNOSTICS and G-CODE HELP
-/// are one-line rows whose labels start where the pill does, with no icon and
-/// no keycap under them; SETTINGS has no row at all and is reached with its
-/// chord.
+/// Navigation tabs remain visible across the top at the minimum window size.
 #[test]
 fn the_navigation_is_compact_and_lists_six_pages() {
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
@@ -1273,104 +1244,26 @@ fn the_navigation_is_compact_and_lists_six_pages() {
     let output = harness.frame_full(Vec::new());
     let texts = painted_text(&output);
     let nav = region(&harness.app, "nav");
-    let in_nav = |text: &str| {
-        texts
-            .iter()
-            .find(|(painted, rect)| painted == text && rect.left() < theme::NAV_WIDTH)
-            .map(|(_, rect)| *rect)
-            .unwrap_or_else(|| panic!("{text} is a navigation row"))
-    };
+    let mut previous = 0.0;
     for label in ["MACHINE", "PROGRAM", "TOOLS", "OFFSETS", "DIAG", "G-CODE"] {
-        in_nav(label);
-    }
-    assert!(
-        !texts
+        let rect = texts
             .iter()
-            .any(|(text, rect)| text == "SETTINGS" && rect.left() < theme::NAV_WIDTH),
-        "SETTINGS has no navigation row"
-    );
-    // A one-line row keeps its chord on the label's own line, at the pill's
-    // right edge, instead of stacking it underneath.
-    for (label, keycap) in [("DIAG", "Ctrl+D"), ("G-CODE", "Ctrl+H")] {
-        let label_rect = in_nav(label);
-        let keycap_rect = in_nav(keycap);
+            .find(|(text, rect)| text == label && nav.contains(rect.center()))
+            .unwrap_or_else(|| panic!("{label} missing from navigation"))
+            .1;
         assert!(
-            (keycap_rect.center().y - label_rect.center().y).abs() < 1.5,
-            "{keycap} shares the {label} row: {keycap_rect:?} vs {label_rect:?}"
+            rect.left() >= previous,
+            "tabs should be ordered left to right"
         );
-        assert!(
-            keycap_rect.left() > label_rect.right(),
-            "{keycap} sits to the right of {label}"
-        );
+        previous = rect.right();
     }
-    // Six pills: four that carry an icon and a keycap, two one-liners.
-    let mut heights: Vec<f32> = painted_rects(&output)
-        .into_iter()
-        .filter(|rect| {
-            rect.left() >= nav.left() && rect.right() <= nav.right() && rect.width() > 100.0
-        })
-        .map(|rect| rect.height())
-        .filter(|height| *height > 10.0 && *height < 40.0)
-        .collect();
-    heights.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    assert_eq!(heights.len(), 6, "six painted rows, got {heights:?}");
-    // One list: the four primary rows paint one pill height and the two
-    // one-line rows a shorter pill, so the one-line labels do not sit in a
-    // 26 px band of empty space.
-    assert_eq!(
-        heights
-            .iter()
-            .filter(|height| (**height - theme::NAV_PILL_PRIMARY).abs() < 0.5)
-            .count(),
-        4,
-        "{heights:?}"
-    );
-    assert_eq!(
-        heights
-            .iter()
-            .filter(|height| (**height - theme::NAV_PILL_SECONDARY).abs() < 0.5)
-            .count(),
-        2,
-        "{heights:?}"
-    );
-    assert!(
-        theme::NAV_PILL_SECONDARY < theme::NAV_PILL_PRIMARY,
-        "a one-line row is shorter than a two-line row"
-    );
-    // Pitch: the target plus the gap, from the labels that sit in them.
-    let pitch = in_nav("PROGRAM").center().y - in_nav("MACHINE").center().y;
-    assert!(
-        (pitch - (nav_row_geometry(Page::Machine).height + theme::NAV_ROW_GAP)).abs() < 0.6,
-        "row pitch {pitch}"
-    );
-    // A one-line row starts at the pill's inset: no icon column to clear.
-    assert!(
-        in_nav("DIAG").left() < in_nav("MACHINE").left() - 15.0,
-        "DIAG is a one-line row: {} vs {}",
-        in_nav("DIAG").left(),
-        in_nav("MACHINE").left()
-    );
-    // The list ends a few pixels above the SHORTCUTS frame, not a band of air.
-    let shortcuts = in_nav_top(&texts, "SHORTCUTS");
-    // From the end of the last row's target to the SHORTCUTS frame's own
-    // margin: the two NAV_BOTTOM_GAPs and the separator's lines, not a band
-    // of air. It was 35 px before the list was compacted.
-    let last_target_bottom =
-        in_nav("G-CODE").center().y + nav_row_geometry(Page::Help).height * 0.5;
-    assert!(
-        shortcuts - last_target_bottom < 20.0,
-        "bottom padding {}",
-        shortcuts - last_target_bottom
-    );
-    // Ctrl+M is REMAINING: the view changes, the page does not.
+    assert!(texts
+        .iter()
+        .any(|(text, rect)| text == "SHORTCUTS ▾" && nav.contains(rect.center())));
     let page = harness.app.nav.page;
     harness.frame_with(&[(egui::Key::M, ctrl())]);
-    assert!(
-        harness.app.graph_style.remaining,
-        "Ctrl+M turns REMAINING on"
-    );
-    assert_eq!(harness.app.nav.page, page, "a view mode, not a page");
-    // The pages behind the rows still answer their own chords.
+    assert!(harness.app.graph_style.remaining);
+    assert_eq!(harness.app.nav.page, page);
     harness.frame_with(&[(egui::Key::D, ctrl())]);
     assert_eq!(harness.app.nav.page, Page::Diagnostics);
     harness.frame_with(&[(egui::Key::H, ctrl())]);
@@ -1385,7 +1278,7 @@ fn pc_keyboard_legends_name_f_keys_and_panel_legends_stay_default() {
     harness.app.set_page(Page::Machine);
     let texts = painted_text(&harness.frame_full(Vec::new()));
     // Panel legends: the four nav keycaps, the FILE hint and the view toggles.
-    for label in ["MAIN", "FILE", "TOOL", "PROBE", "\u{25a2}", "Ctrl+\u{25a2}"] {
+    for label in ["MAIN", "FILE", "TOOL", "PROBE"] {
         assert!(
             texts.iter().any(|(text, _)| text == label),
             "{label} missing from the panel legends"
@@ -1395,14 +1288,7 @@ fn pc_keyboard_legends_name_f_keys_and_panel_legends_stay_default() {
     harness.app.profile.config.ui.keyboard = "pc".to_string();
     let texts = painted_text(&harness.frame_full(Vec::new()));
     // The same hints, with the panel name and the key a normal keyboard sends.
-    for label in [
-        "MAIN · F5",
-        "FILE · F6",
-        "TOOL · F7",
-        "OFFS · F8",
-        "F10",
-        "Ctrl+F10",
-    ] {
+    for label in ["MAIN · F5", "FILE · F6", "TOOL · F7", "OFFS · F8"] {
         assert!(
             texts.iter().any(|(text, _)| text == label),
             "{label} missing from the PC legends"
@@ -1412,7 +1298,7 @@ fn pc_keyboard_legends_name_f_keys_and_panel_legends_stay_default() {
         assert!(
             !texts
                 .iter()
-                .any(|(text, rect)| text == gone && rect.left() < theme::NAV_WIDTH),
+                .any(|(text, rect)| text == gone && rect.top() < theme::NAV_BAR_HEIGHT),
             "{gone} still painted in the navigation with [ui] keyboard = \"pc\""
         );
     }
@@ -1423,13 +1309,13 @@ fn pc_keyboard_legends_name_f_keys_and_panel_legends_stay_default() {
         assert!(
             texts
                 .iter()
-                .any(|(text, rect)| text == paired && rect.left() < theme::NAV_WIDTH),
+                .any(|(text, rect)| text == paired && rect.top() < theme::NAV_BAR_HEIGHT),
             "{paired} missing from the navigation"
         );
         assert!(
             !texts
                 .iter()
-                .any(|(text, rect)| text == paired && rect.left() >= theme::NAV_WIDTH),
+                .any(|(text, rect)| text == paired && rect.top() >= theme::NAV_BAR_HEIGHT),
             "{paired} is a navigation legend, not a keyboard one"
         );
     }
@@ -1576,19 +1462,12 @@ fn remaining_takes_the_live_trail_out_of_the_style() {
     assert_eq!(view.eaten_through, None);
 }
 
-fn in_nav_top(texts: &[(String, egui::Rect)], label: &str) -> f32 {
-    texts
-        .iter()
-        .find(|(text, rect)| text == label && rect.left() < theme::NAV_WIDTH)
-        .map(|(_, rect)| rect.top())
-        .unwrap_or_else(|| panic!("{label} is painted in the sidebar"))
-}
-
 /// The arrows walk the navigation over all six rows, and Enter opens the
 /// page the highlighted row names.
 #[test]
 fn the_arrow_keys_walk_all_six_navigation_rows() {
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.show_dro_cards = true;
     harness.app.set_page(Page::Machine);
     harness.app.focus_nav();
     harness.frame(&[]);
@@ -1606,6 +1485,16 @@ fn the_arrow_keys_walk_all_six_navigation_rows() {
     assert_eq!(
         harness.app.nav.nav_focus, 5,
         "the last row is the end of the list"
+    );
+    harness.frame(&[egui::Key::ArrowLeft]);
+    assert_eq!(
+        harness.app.nav.nav_focus, 4,
+        "ArrowLeft moves to the previous tab"
+    );
+    harness.frame(&[egui::Key::ArrowRight]);
+    assert_eq!(
+        harness.app.nav.nav_focus, 5,
+        "ArrowRight moves to the next tab"
     );
     harness.app.nav.nav_focus = 5;
     harness.frame(&[egui::Key::Enter]);
@@ -1631,49 +1520,33 @@ fn region(app: &LincApp, name: &str) -> egui::Rect {
     )
 }
 
-/// The SHORTCUTS pane sizes to its content while that fits, and takes the
-/// sidebar's remainder — down to the footer, less a little air — once the
-/// list is longer, scrolling inside itself.
+/// The shortcut menu is closed initially and exposes the current page's hints.
 #[test]
-fn the_shortcuts_pane_sizes_to_content_then_to_the_footer() {
-    // Diagnostics has one hint: the pane ends well above the footer.
-    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
-    harness.app.set_page(Page::Diagnostics);
-    harness.frame(&[]);
-    let output = harness.frame_full(Vec::new());
-    let nav = region(&harness.app, "nav");
-    let pane = shortcuts_frame(&output).expect("the shortcuts pane is drawn");
-    assert!(
-        pane.bottom() < nav.bottom() - 40.0,
-        "a short list keeps the pane at its content height: {pane:?} in {nav:?}"
-    );
-
-    // A profile that lists every navigation page still fits at 1280x720:
-    // after the rows were compacted the Program page's list stays
-    // content-sized instead of running to the footer. It must never pass
-    // the navigation column's content edge.
-    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
-    harness.app.nav.pages = nav_pages(
-        &[
-            "machine",
-            "program",
-            "tools",
-            "offsets",
-            "diagnostics",
-            "help",
-        ]
-        .map(str::to_string),
-    );
+fn the_shortcuts_menu_opens_and_shows_page_hints() {
+    let mut harness = ProbeHarness::ready(PanelMode::Auto, false, true, MachinePower::On);
     harness.app.set_page(Page::Program);
     harness.frame(&[]);
     let output = harness.frame_full(Vec::new());
-    let nav = region(&harness.app, "nav");
-    // The column's own 8 px bottom margin and the 4 px that keep the pane
-    // off the footer.
-    let pane = shortcuts_frame(&output).expect("the shortcuts pane is drawn");
+    let texts = painted_text(&output);
+    let point = texts
+        .iter()
+        .find(|(text, _)| text == "SHORTCUTS ▾")
+        .expect("menu button")
+        .1
+        .center();
+    assert!(!texts.iter().any(|(text, _)| text == "CLEAR TRAIL"));
+    harness.frame_full(vec![
+        egui::Event::PointerMoved(point),
+        press_at(point, true),
+    ]);
+    harness.frame_full(vec![
+        egui::Event::PointerMoved(point),
+        press_at(point, false),
+    ]);
+    let texts = painted_text(&harness.frame_full(Vec::new()));
     assert!(
-        pane.bottom() <= nav.bottom() - 8.0 - 4.0 + 1.5,
-        "the pane never passes the navigation column: {pane:?} in {nav:?}"
+        texts.iter().any(|(text, _)| text == "CLEAR TRAIL"),
+        "menu should show page shortcuts"
     );
 }
 
@@ -1704,6 +1577,7 @@ fn ctrl_plus_and_minus_leave_the_ui_scale_alone() {
 #[test]
 fn the_main_page_cards_end_on_the_page_bottom_edge() {
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.show_dro_cards = true;
     harness.app.set_page(Page::Machine);
     harness.frame(&[]);
     let output = harness.frame_full(Vec::new());
@@ -3229,6 +3103,181 @@ fn run_from_line_uses_the_selected_line_not_the_controller_line() {
     assert_eq!(block, "G1 X10");
 }
 
+#[test]
+fn picking_a_3d_segment_in_toolpath_updates_selected_line() {
+    let (_dir, mut app) = make_app(PanelMode::Edit);
+    let text = "G21 G90\nG0 X0 Y0 Z0\nG1 X50 Y0 Z0 F500\nG1 X100 Y50 Z0\n";
+    app.snapshot.program.content = Some(std::sync::Arc::new(text.to_string()));
+    app.snapshot.program.line_count = 4;
+    let preview = linc_core::gcode::parse_preview(text, &["X".into(), "Y".into(), "Z".into()], None, [0.0; 3]);
+    app.program.last_valid_preview = preview;
+    app.program.selected_line = 1;
+
+    let mut zoom = 1.0f32;
+    let mut pan = egui::Vec2::ZERO;
+    let mut yaw = 0.0f32;
+    let mut pitch = 0.0f32;
+    let mut fit = false;
+    let mut auto_fit = false;
+
+    let ctx = egui::Context::default();
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+    let ref_bounds = app
+        .machine_bounds()
+        .unwrap_or(app.program.last_valid_preview.bounds.unwrap());
+    let mut card_rect = rect;
+
+    let raw = |events| egui::RawInput {
+        screen_rect: Some(rect),
+        events,
+        ..Default::default()
+    };
+    let f0 = raw(Vec::new());
+    let mut out0 = ctx.run_ui(f0, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let drawn = screens::common::trajectory(
+                &app,
+                ui,
+                &app.program.last_valid_preview,
+                600.0,
+                linc_view::ViewMode::TopXy,
+                &mut zoom,
+                &mut pan,
+                &mut yaw,
+                &mut pitch,
+                &mut fit,
+                &mut auto_fit,
+                Some(1),
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            card_rect = drawn.response.rect;
+        });
+    });
+    out0.textures_delta.clear();
+
+    let projection = linc_view::Projection::new(
+        ref_bounds,
+        card_rect.shrink(12.0),
+        linc_view::ViewMode::TopXy,
+        0.0,
+        0.0,
+        zoom,
+        pan,
+    );
+    let click_pos = projection.project([25.0, 0.0, 0.0]);
+
+    let f_move = raw(vec![egui::Event::PointerMoved(click_pos)]);
+    let mut out_m = ctx.run_ui(f_move, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let _ = screens::common::trajectory(
+                &app,
+                ui,
+                &app.program.last_valid_preview,
+                600.0,
+                linc_view::ViewMode::TopXy,
+                &mut zoom,
+                &mut pan,
+                &mut yaw,
+                &mut pitch,
+                &mut fit,
+                &mut auto_fit,
+                Some(1),
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+        });
+    });
+    out_m.textures_delta.clear();
+
+    let f1 = raw(vec![egui::Event::PointerButton {
+        pos: click_pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    let mut out1 = ctx.run_ui(f1, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let drawn = screens::common::trajectory(
+                &app,
+                ui,
+                &app.program.last_valid_preview,
+                600.0,
+                linc_view::ViewMode::TopXy,
+                &mut zoom,
+                &mut pan,
+                &mut yaw,
+                &mut pitch,
+                &mut fit,
+                &mut auto_fit,
+                Some(1),
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            if let Some(picked) = drawn.picked_line {
+                app.program.selected_line = picked;
+                app.program.code_scroll_to_line = Some(picked);
+            }
+        });
+    });
+    out1.textures_delta.clear();
+
+    let f2 = raw(vec![egui::Event::PointerButton {
+        pos: click_pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    let mut out2 = ctx.run_ui(f2, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
+            let drawn = screens::common::trajectory(
+                &app,
+                ui,
+                &app.program.last_valid_preview,
+                600.0,
+                linc_view::ViewMode::TopXy,
+                &mut zoom,
+                &mut pan,
+                &mut yaw,
+                &mut pitch,
+                &mut fit,
+                &mut auto_fit,
+                Some(1),
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            if let Some(picked) = drawn.picked_line {
+                app.program.selected_line = picked;
+                app.program.code_scroll_to_line = Some(picked);
+            }
+        });
+    });
+    out2.textures_delta.clear();
+
+    assert_eq!(app.program.selected_line, 3);
+    assert_eq!(app.program.code_scroll_to_line, Some(3));
+}
+
 use linc_core::probe::ProbeCategory;
 
 /// The one wording both calibration routines share under PROTECT.
@@ -4575,6 +4624,7 @@ fn the_code_thumbnail_refits_when_the_card_changes_size() {
 #[test]
 fn the_dro_puts_the_axis_name_on_the_coordinate_line() {
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.show_dro_cards = true;
     harness.app.set_page(Page::Machine);
     harness.frame(&[]);
     let output = harness.frame_full(Vec::new());
@@ -4662,6 +4712,7 @@ fn a_long_coordinate_drops_the_machine_value_instead_of_overlapping() {
 #[test]
 fn the_dro_cards_lost_the_second_row_and_the_toolpath_grew() {
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.show_dro_cards = true;
     harness.app.set_page(Page::Machine);
     harness.frame(&[]);
     let output = harness.frame_full(Vec::new());
@@ -4701,7 +4752,7 @@ fn the_dro_cards_lost_the_second_row_and_the_toolpath_grew() {
 fn nav_row_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
     painted_text(output)
         .into_iter()
-        .find(|(text, rect)| text == label && rect.left() < theme::NAV_WIDTH)
+        .find(|(text, rect)| text == label && rect.top() < theme::NAV_BAR_HEIGHT)
         .map(|(_, rect)| rect.center())
         .unwrap_or_else(|| panic!("{label} is painted in the navigation"))
 }
@@ -4721,7 +4772,7 @@ fn probe_category_point(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
 fn toolpath_card_point(output: &egui::FullOutput) -> egui::Pos2 {
     let (_, rect) = painted_text(output)
         .into_iter()
-        .find(|(text, _)| text == "TOOLPATH" || text == "PATH")
+        .find(|(text, _)| text == "TOOLPATH" || text == "PATH" || text == "TAKIM YOLU")
         .expect("the toolpath card paints its title");
     rect.center() + egui::vec2(0.0, 40.0)
 }
@@ -5020,7 +5071,7 @@ fn a_navigation_click_releases_the_keyboard_from_the_gcode_editor() {
 #[test]
 fn the_offsets_navigation_row_cycles_the_probe_tabs() {
     let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
-    let mut click_offsets = |harness: &mut ProbeHarness| {
+    let click_offsets = |harness: &mut ProbeHarness| {
         let output = harness.frame_full(Vec::new());
         let row = nav_row_center(&output, "OFFSETS");
         harness.frame_events(vec![egui::Event::PointerMoved(row)]);
@@ -5060,7 +5111,7 @@ fn the_diag_navigation_row_cycles_the_visible_tabs() {
     let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
     let tabs = DiagnosticsTab::visible(&harness.app.profile);
     harness.app.diagnostics.tab = tabs[0];
-    let mut click_diag = |harness: &mut ProbeHarness| {
+    let click_diag = |harness: &mut ProbeHarness| {
         let output = harness.frame_full(Vec::new());
         let row = nav_row_center(&output, "DIAG");
         harness.frame_events(vec![egui::Event::PointerMoved(row)]);
@@ -5936,8 +5987,13 @@ fn probe_labels_hide_internal_numbers_and_empty_apply_prompts() {
         "Calibrate: the offset label remains"
     );
     assert!(
-        texts.iter().any(|(text, _)| text == "RESET CAL"),
-        "Calibrate: the shortened reset shortcut is painted"
+        harness
+            .app
+            .key_hints()
+            .iter()
+            .flat_map(|group| group.items.iter())
+            .any(|(_, action)| *action == "RESET CAL"),
+        "Calibrate: the shortened reset shortcut is available in the menu"
     );
 }
 
@@ -7163,4 +7219,841 @@ fn history_limit_drops_the_oldest_block() {
     mdi.commit(2, "G3 X4".into());
     assert_eq!(mdi.len(), 2);
     assert_eq!(mdi.blocks[1].0, "G3 X4");
+}
+
+#[test]
+fn embedded_panel_preview_displays_live_values_without_commands() {
+    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.snapshot.panel.feed_override = 0.75;
+    harness.app.snapshot.panel.program_protect = true;
+    harness.app.snapshot.panel.program_protect_known = true;
+    let mut output = harness.ctx.run_ui(probe_raw_input(Vec::new()), |ui| {
+        ui.set_width(240.0);
+        harness.app.draw_panel_preview(ui);
+    });
+    output.textures_delta.clear();
+    let texts = painted_text(&output);
+    for label in ["SIM PANEL", "SIMULATION PREVIEW", "MODE", "FEED OVERRIDE", "75%", "PROGRAM PROTECT"] {
+        assert!(texts.iter().any(|(text, _)| text == label), "missing {label}");
+    }
+}
+
+#[test]
+fn embedded_estop_click_reaches_simulator_socket() {
+    use crate::shell::panel_preview_control::PanelPreviewControl;
+    use linc_core::diag::{BuildInfo, ProcessInfo};
+    use linc_diag::panel::{PanelBus, PanelSource};
+    use linc_panel::{sim::{SimControlState, SimPanelDriver, SimPanelHandle}, PanelDriver};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+    let dir = tempfile::tempdir().unwrap();
+    let handle = SimPanelHandle::new();
+    let bus = Arc::new(Mutex::new(PanelBus::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_poll = stop.clone();
+    let bus_poll = bus.clone();
+    let handle_poll = handle.clone();
+    let poll = std::thread::spawn(move || {
+        let mut driver = SimPanelDriver::new(handle_poll, Duration::from_millis(10));
+        while !stop_poll.load(Ordering::Relaxed) {
+            if let Ok(snapshot) = driver.poll() { bus_poll.lock().unwrap().publish(snapshot); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let process = ProcessInfo { pid: std::process::id(), role: "panel".into(), build: BuildInfo { backend: "sim".into(), profile: "ui-test".into(), ..Default::default() } };
+    let source = Arc::new(PanelSource::new(bus, process, Some(Arc::new(SimControlState::new(handle.clone())))));
+    let server = linc_diag::serve(dir.path().to_path_buf(), "panel", source).unwrap();
+    let control = PanelPreviewControl::in_dir("ui-test".into(), dir.path().to_path_buf());
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut output = harness.ctx.run_ui(probe_raw_input(events), |ui| {
+            ui.set_width(260.0);
+            harness.app.draw_panel_preview(ui);
+        });
+        output.textures_delta.clear();
+        output
+    };
+    let first = draw(vec![]);
+    let point = painted_text(&first).into_iter().find(|(text, _)| text == "RELEASE SIM E-STOP").expect("enabled simulator E-stop").1.center();
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    while handle.snapshot().estop { assert!(std::time::Instant::now() < deadline, "E-stop click did not reach panel"); std::thread::sleep(Duration::from_millis(10)); }
+    harness.app.panel_preview_control = None;
+    drop(server);
+    stop.store(true, Ordering::Relaxed);
+    poll.join().unwrap();
+}
+
+#[test]
+fn embedded_jog_press_and_release_reaches_simulator_socket() {
+    use crate::shell::panel_preview_control::PanelPreviewControl;
+    use linc_core::diag::{BuildInfo, ProcessInfo};
+    use linc_diag::panel::{PanelBus, PanelSource};
+    use linc_panel::{sim::{SimControlState, SimPanelDriver, SimPanelHandle}, PanelDriver};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+    let dir = tempfile::tempdir().unwrap();
+    let handle = SimPanelHandle::new();
+    let bus = Arc::new(Mutex::new(PanelBus::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_poll = stop.clone();
+    let bus_poll = bus.clone();
+    let handle_poll = handle.clone();
+    let poll = std::thread::spawn(move || {
+        let mut driver = SimPanelDriver::new(handle_poll, Duration::from_millis(10));
+        while !stop_poll.load(Ordering::Relaxed) {
+            if let Ok(snapshot) = driver.poll() { bus_poll.lock().unwrap().publish(snapshot); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let process = ProcessInfo { pid: std::process::id(), role: "panel".into(), build: BuildInfo { backend: "sim".into(), profile: "ui-test".into(), ..Default::default() } };
+    let source = Arc::new(PanelSource::new(bus, process, Some(Arc::new(SimControlState::new(handle.clone())))));
+    let server = linc_diag::serve(dir.path().to_path_buf(), "panel", source).unwrap();
+    let control = PanelPreviewControl::in_dir("ui-test".into(), dir.path().to_path_buf());
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 3000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| {
+            ui.set_width(600.0);
+            harness.app.draw_panel_preview(ui);
+        });
+        output.textures_delta.clear();
+        output
+    };
+    let first = draw(vec![]);
+    let point = painted_text(&first).into_iter().find(|(text, _)| text == "X+").expect("X+ jog key").1.center();
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+    while handle.snapshot().buttons & linc_panel::buttons::JOG_XP == 0 {
+        assert!(std::time::Instant::now() < deadline, "X+ press did not reach panel");
+        draw(vec![]);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    while handle.snapshot().buttons & linc_panel::buttons::JOG_XP != 0 {
+        assert!(std::time::Instant::now() < deadline, "X+ release did not reach panel");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    harness.app.panel_preview_control = None;
+    drop(server);
+    stop.store(true, Ordering::Relaxed);
+    poll.join().unwrap();
+}
+
+#[test]
+fn embedded_panel_divider_resizes_with_a_pointer_drag() {
+    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.embedded_panel_visible = true;
+    harness.frame(&[]);
+    harness.frame(&[]);
+    let before = region(&harness.app, "embedded-sim-panel");
+    let point = egui::pos2(before.right(), before.center().y);
+    let end = point + egui::vec2(90.0, 0.0);
+    harness.frame_full(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+    harness.frame_full(vec![egui::Event::PointerMoved(end)]);
+    harness.frame_full(vec![egui::Event::PointerMoved(end), press_at(end, false)]);
+    let after = region(&harness.app, "embedded-sim-panel");
+    assert!(after.width() > before.width() + 40.0, "panel did not resize: {before:?} -> {after:?}");
+}
+
+#[test]
+fn every_mill_matrix_button_responds_to_pointer_press_and_release() {
+    use crate::shell::panel_preview_control::PanelPreviewControl;
+    use linc_core::diag::{BuildInfo, ProcessInfo};
+    use linc_diag::panel::{PanelBus, PanelSource};
+    use linc_panel::{sim::{SimControlState, SimPanelDriver, SimPanelHandle}, PanelDriver};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+    let dir = tempfile::tempdir().unwrap();
+    let handle = SimPanelHandle::new();
+    let bus = Arc::new(Mutex::new(PanelBus::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_poll = stop.clone();
+    let bus_poll = bus.clone();
+    let handle_poll = handle.clone();
+    let poll = std::thread::spawn(move || {
+        let mut driver = SimPanelDriver::new(handle_poll, Duration::from_millis(10));
+        while !stop_poll.load(Ordering::Relaxed) {
+            if let Ok(snapshot) = driver.poll() { bus_poll.lock().unwrap().publish(snapshot); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let process = ProcessInfo { pid: std::process::id(), role: "panel".into(), build: BuildInfo { backend: "sim".into(), profile: "ui-test".into(), ..Default::default() } };
+    let source = Arc::new(PanelSource::new(bus, process, Some(Arc::new(SimControlState::new(handle.clone())))));
+    let server = linc_diag::serve(dir.path().to_path_buf(), "panel", source).unwrap();
+    let control = PanelPreviewControl::in_dir("ui-test".into(), dir.path().to_path_buf());
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 4000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| {
+            ui.set_width(600.0);
+            harness.app.draw_panel_preview(ui);
+        });
+        output.textures_delta.clear();
+        output
+    };
+    for (_, keys) in crate::shell::panel_preview::panel_key_groups(false, false) {
+        for (label, name) in keys {
+            let first = draw(vec![]);
+            let point = painted_text(&first).into_iter().find(|(text, _)| text == label).unwrap_or_else(|| panic!("missing key {label}")).1.center();
+            let mask = linc_panel::sim::button_mask(name).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+            while handle.snapshot().buttons & mask == 0 {
+                assert!(std::time::Instant::now() < deadline, "press did not reach {name}");
+                draw(vec![]);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+            while handle.snapshot().buttons & mask != 0 {
+                assert!(std::time::Instant::now() < deadline, "release did not reach {name}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    harness.app.panel_preview_control = None;
+    drop(server);
+    stop.store(true, Ordering::Relaxed);
+    poll.join().unwrap();
+}
+
+#[test]
+fn every_lathe_matrix_button_responds_to_pointer_press_and_release() {
+    use crate::shell::panel_preview_control::PanelPreviewControl;
+    use linc_core::diag::{BuildInfo, ProcessInfo};
+    use linc_diag::panel::{PanelBus, PanelSource};
+    use linc_panel::{sim::{SimControlState, SimPanelDriver, SimPanelHandle}, PanelDriver};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+    let dir = tempfile::tempdir().unwrap();
+    let handle = SimPanelHandle::new();
+    let bus = Arc::new(Mutex::new(PanelBus::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_poll = stop.clone();
+    let bus_poll = bus.clone();
+    let handle_poll = handle.clone();
+    let poll = std::thread::spawn(move || {
+        let mut driver = SimPanelDriver::new(handle_poll, Duration::from_millis(10));
+        while !stop_poll.load(Ordering::Relaxed) {
+            if let Ok(snapshot) = driver.poll() { bus_poll.lock().unwrap().publish(snapshot); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let process = ProcessInfo { pid: std::process::id(), role: "panel".into(), build: BuildInfo { backend: "sim".into(), profile: "ui-test".into(), ..Default::default() } };
+    let source = Arc::new(PanelSource::new(bus, process, Some(Arc::new(SimControlState::new(handle.clone())))));
+    let server = linc_diag::serve(dir.path().to_path_buf(), "panel", source).unwrap();
+    let control = PanelPreviewControl::in_dir("ui-test".into(), dir.path().to_path_buf());
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.profile.variant = MachineVariant::Lathe;
+    harness.app.profile.config.lathe = Some(linc_core::config::LatheConfig {
+        turret_stations: None, power_turret: None, live_tooling: None,
+        live_tool_max_rpm: None, c_axis: None, y_axis: None, sub_spindle: Some(true),
+    });
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 4000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| {
+            ui.set_width(600.0);
+            harness.app.draw_panel_preview(ui);
+        });
+        output.textures_delta.clear();
+        output
+    };
+    for (_, keys) in crate::shell::panel_preview::panel_key_groups(true, true) {
+        for (label, name) in keys {
+            let first = draw(vec![]);
+            let point = painted_text(&first).into_iter().find(|(text, _)| text == label).unwrap_or_else(|| panic!("missing key {label}")).1.center();
+            let mask = linc_panel::sim::button_mask(name).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+            while handle.snapshot().buttons & mask == 0 {
+                assert!(std::time::Instant::now() < deadline, "press did not reach {name}");
+                draw(vec![]);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+            while handle.snapshot().buttons & mask != 0 {
+                assert!(std::time::Instant::now() < deadline, "release did not reach {name}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+    harness.app.panel_preview_control = None;
+    drop(server);
+    stop.store(true, Ordering::Relaxed);
+    poll.join().unwrap();
+}
+
+#[test]
+fn embedded_power_mode_and_protect_clicks_reach_simulator_socket() {
+    use crate::shell::panel_preview_control::PanelPreviewControl;
+    use linc_core::diag::{BuildInfo, ProcessInfo};
+    use linc_diag::panel::{PanelBus, PanelSource};
+    use linc_panel::{sim::{SimControlState, SimPanelDriver, SimPanelHandle}, PanelDriver};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+    let dir = tempfile::tempdir().unwrap();
+    let handle = SimPanelHandle::new();
+    let bus = Arc::new(Mutex::new(PanelBus::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_poll = stop.clone();
+    let bus_poll = bus.clone();
+    let handle_poll = handle.clone();
+    let poll = std::thread::spawn(move || {
+        let mut driver = SimPanelDriver::new(handle_poll, Duration::from_millis(10));
+        while !stop_poll.load(Ordering::Relaxed) {
+            if let Ok(snapshot) = driver.poll() { bus_poll.lock().unwrap().publish(snapshot); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let process = ProcessInfo { pid: std::process::id(), role: "panel".into(), build: BuildInfo { backend: "sim".into(), profile: "ui-test".into(), ..Default::default() } };
+    let source = Arc::new(PanelSource::new(bus, process, Some(Arc::new(SimControlState::new(handle.clone())))));
+    let server = linc_diag::serve(dir.path().to_path_buf(), "panel", source).unwrap();
+    let control = PanelPreviewControl::in_dir("ui-test".into(), dir.path().to_path_buf());
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut output = harness.ctx.run_ui(probe_raw_input(events), |ui| {
+            ui.set_width(260.0);
+            harness.app.draw_panel_preview(ui);
+        });
+        output.textures_delta.clear();
+        output
+    };
+    let click = |label: &str| {
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter().find(|(text, _)| text == label).unwrap_or_else(|| panic!("missing {label}")).1.center();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    };
+    click("POWER ON");
+    let wait_until = |condition: &dyn Fn() -> bool| {
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        while !condition() { assert!(std::time::Instant::now() < until, "control did not update"); std::thread::sleep(Duration::from_millis(10)); }
+    };
+    wait_until(&|| handle.snapshot().power && !handle.snapshot().estop);
+    click("MDI");
+    wait_until(&|| handle.snapshot().mode == PanelMode::Mdi);
+    click("PROTECT");
+    wait_until(&|| handle.snapshot().program_protect);
+    click("POWER OFF");
+    wait_until(&|| !handle.snapshot().power);
+    harness.app.panel_preview_control = None;
+    drop(server);
+    stop.store(true, Ordering::Relaxed);
+    poll.join().unwrap();
+}
+
+#[test]
+fn embedded_override_pointer_clicks_reach_simulator_socket() {
+    use crate::shell::panel_preview_control::PanelPreviewControl;
+    use linc_core::diag::{BuildInfo, ProcessInfo};
+    use linc_diag::panel::{PanelBus, PanelSource};
+    use linc_panel::{sim::{SimControlState, SimPanelDriver, SimPanelHandle}, PanelDriver};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+    let dir = tempfile::tempdir().unwrap();
+    let handle = SimPanelHandle::new();
+    let bus = Arc::new(Mutex::new(PanelBus::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_poll = stop.clone();
+    let bus_poll = bus.clone();
+    let handle_poll = handle.clone();
+    let poll = std::thread::spawn(move || {
+        let mut driver = SimPanelDriver::new(handle_poll, Duration::from_millis(10));
+        while !stop_poll.load(Ordering::Relaxed) {
+            if let Ok(snapshot) = driver.poll() { bus_poll.lock().unwrap().publish(snapshot); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let process = ProcessInfo { pid: std::process::id(), role: "panel".into(), build: BuildInfo { backend: "sim".into(), profile: "ui-test".into(), ..Default::default() } };
+    let source = Arc::new(PanelSource::new(bus, process, Some(Arc::new(SimControlState::new(handle.clone())))));
+    let server = linc_diag::serve(dir.path().to_path_buf(), "panel", source).unwrap();
+    let control = PanelPreviewControl::in_dir("ui-test".into(), dir.path().to_path_buf());
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 4000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| {
+            ui.set_width(600.0);
+            harness.app.draw_panel_preview(ui);
+        });
+        output.textures_delta.clear();
+        output
+    };
+    for (label, read) in [
+        ("FEED %", (|s: &linc_panel::sim::SimPanelState| s.feed_override) as fn(&linc_panel::sim::SimPanelState) -> f64),
+        ("RAPID %", (|s: &linc_panel::sim::SimPanelState| s.rapid_override) as fn(&linc_panel::sim::SimPanelState) -> f64),
+        ("SPINDLE %", (|s: &linc_panel::sim::SimPanelState| s.spindle_override) as fn(&linc_panel::sim::SimPanelState) -> f64),
+    ] {
+        let frame = draw(vec![]);
+        let rect = painted_text(&frame).into_iter().find(|(text, _)| text == label).unwrap_or_else(|| panic!("missing {label}")).1;
+        let point = egui::pos2(rect.left() - 110.0, rect.center().y);
+        let before = read(&handle.snapshot());
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        while (read(&handle.snapshot()) - before).abs() < 0.01 {
+            assert!(std::time::Instant::now() < until, "{label} pointer did not change value at {point:?}, label {rect:?}");
+            draw(vec![]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    harness.app.panel_preview_control = None;
+    drop(server);
+    stop.store(true, Ordering::Relaxed);
+    poll.join().unwrap();
+}
+
+/// Requires the isolated sim-no3d LinuxCNC session started by start-sim.sh.
+/// It intentionally uses the real egui input and panel socket, then reads HAL.
+#[test]
+#[ignore = "requires a powered and homed isolated LinuxCNC simulation"]
+fn embedded_ui_jog_moves_and_stops_real_linuxcnc_simulation() {
+    use crate::shell::panel_preview_control::{Command, PanelPreviewControl};
+    let dir = std::path::PathBuf::from(std::env::var_os("LINC_DIAG_DIR").expect("isolated simulation diagnostic directory"));
+    let instance = linc_diag::discovery::read_instance(&dir, "panel").unwrap();
+    assert_eq!(instance.build.backend, "sim");
+    assert_eq!(instance.profile, "BaierMill Simulation");
+    let get = |pin: &str| {
+        let result = std::process::Command::new("halcmd").args(["getp", pin]).output().unwrap();
+        assert!(result.status.success(), "HAL pin unavailable: {pin}");
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(get("halui.machine.is-on"), "TRUE");
+    assert_eq!(get("halui.joint.0.is-homed"), "TRUE");
+    let control = PanelPreviewControl::in_dir(instance.profile, dir);
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !control.state().ready { assert!(std::time::Instant::now() < until); std::thread::sleep(Duration::from_millis(10)); }
+    control.send(Command::Mode("JOG"));
+    while get("cnc_panel.mode_jog") != "TRUE" { assert!(std::time::Instant::now() < until); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 3000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| { ui.set_width(600.0); harness.app.draw_panel_preview(ui); });
+        output.textures_delta.clear();
+        output
+    };
+    for (axis, label, direction) in [
+        ("x", "X−", -1.0), ("x", "X+", 1.0),
+        ("y", "Y−", -1.0), ("y", "Y+", 1.0),
+        ("z", "Z−", -1.0), ("z", "Z+", 1.0),
+    ] {
+        let position = || get(&format!("halui.axis.{axis}.pos-feedback")).parse::<f64>().unwrap();
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter().find(|(text, _)| text == label).unwrap_or_else(|| panic!("missing {label} key")).1.center();
+        let start = position();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        let end = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < end { draw(vec![]); std::thread::sleep(Duration::from_millis(20)); }
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+        std::thread::sleep(Duration::from_millis(400));
+        let stopped = position();
+        std::thread::sleep(Duration::from_millis(300));
+        let later = position();
+        assert!((stopped - start) * direction > 0.01, "{label} did not move: {start} -> {stopped}");
+        assert!((later - stopped).abs() < 0.01, "{label} did not stop: {stopped} -> {later}");
+        eprintln!("{label}: {start:.3} -> {stopped:.3} mm, stopped");
+    }
+    let click = |label: &str| {
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter()
+            .find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .1.center();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    };
+    let wait_pin = |pin: &str, expected: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while get(pin) != expected {
+            assert!(std::time::Instant::now() < deadline, "{pin} did not become {expected}");
+            draw(vec![]);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    for (label, pin) in [
+        ("AUTO", "mode_auto"), ("EDIT", "mode_edit"),
+        ("MDI", "mode_mdi"), ("JOG", "mode_jog"),
+        ("INC", "mode_inc"), ("MPG", "mode_mpg"),
+        ("HOME", "mode_home"), ("PROG.HOME", "mode_proghome"),
+    ] {
+        click(label);
+        wait_pin(&format!("cnc_panel.{pin}"), "TRUE");
+        eprintln!("{label}: HAL selected");
+    }
+    for (label, pin) in [
+        ("FEED %", "cnc_panel.feed_override"),
+        ("RAPID %", "cnc_panel.rapid_override"),
+        ("SPINDLE %", "cnc_panel.spindle_override"),
+    ] {
+        let before = get(pin).parse::<f64>().unwrap();
+        let frame = draw(vec![]);
+        let rect = painted_text(&frame).into_iter().find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing {label}")).1;
+        let point = egui::pos2(rect.left() - 110.0, rect.center().y);
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let after = get(pin).parse::<f64>().unwrap();
+            if (after - before).abs() > 0.01 {
+                eprintln!("{label}: {before:.2} -> {after:.2}");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{label} did not change HAL");
+            draw(vec![]);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    for (label, key, pin) in [
+        ("WORKLAMP", "worklamp", "rio.worklamp.bit"),
+        ("COOLANT", "coolant", "halui.flood.is-on"),
+        ("LUB", "lube", "halui.lube.is-on"),
+        ("S.B.K.", "sbk", "toggle.sbk.out"),
+        ("B.D.T.", "bdt", "halui.program.block-delete.is-on"),
+        ("OPT", "opt", "halui.program.optional-stop.is-on"),
+    ] {
+        // LinuxCNC may automatically start lube after power-on, independently
+        // of the toggle's initial state. The next edge flips the toggle state,
+        // not necessarily the current reported lube output.
+        let initial = if key == "lube" { get("toggle.lube.out") } else { get(pin) };
+        let changed = if initial == "TRUE" { "FALSE" } else { "TRUE" };
+        for expected in [changed, initial.as_str()] {
+            let frame = draw(vec![]);
+            let point = painted_text(&frame).into_iter().find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("missing {label}")).1.center();
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+            wait_pin(&format!("cnc_panel.{key}"), "TRUE");
+            let until = std::time::Instant::now() + Duration::from_millis(160);
+            while std::time::Instant::now() < until {
+                draw(vec![]);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+            wait_pin(pin, expected);
+            wait_pin(&format!("cnc_panel.{key}"), "FALSE");
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        eprintln!("{label}: toggled and restored via {pin}");
+    }
+    assert_eq!(get("cnc_panel.program_protect"), "FALSE");
+    click("PROTECT");
+    wait_pin("cnc_panel.program_protect", "TRUE");
+    eprintln!("PROTECT: HAL on");
+    click("ACTIVATE SIM E-STOP");
+    wait_pin("halui.estop.is-activated", "TRUE");
+    wait_pin("halui.machine.is-on", "FALSE");
+    eprintln!("E-STOP: active, machine off");
+    click("JOG");
+    wait_pin("cnc_panel.mode_jog", "TRUE");
+    let disconnected = harness.app.panel_preview_control.as_ref().unwrap().state().disconnected_buttons;
+    let mut verified = 0;
+    for (_, keys) in crate::shell::panel_preview::panel_key_groups(false, false) {
+        for (label, key) in keys {
+            if disconnected.iter().any(|name| name == key) { continue; }
+            let pin = format!("cnc_panel.{key}");
+            let frame = draw(vec![]);
+            let point = painted_text(&frame).into_iter().find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("missing {label}")).1.center();
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+            wait_pin(&pin, "TRUE");
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+            wait_pin(&pin, "FALSE");
+            verified += 1;
+            eprintln!("{label}: press and release reached {pin}");
+        }
+    }
+    assert!(verified > 0, "no wired panel controls were tested");
+    let frame = draw(vec![]);
+    let point = painted_text(&frame).into_iter().find(|(text, _)| text == "PROBE CONTACT")
+        .expect("simulation probe contact").1.center();
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+    wait_pin("cnc_panel.probe", "TRUE");
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    wait_pin("cnc_panel.probe", "FALSE");
+    eprintln!("{verified} wired keys and probe: press and release reached HAL");
+}
+
+#[test]
+#[ignore = "requires a powered and homed isolated LinuxCNC lathe simulation"]
+fn embedded_lathe_wired_keys_reach_real_linuxcnc_hal() {
+    use crate::shell::panel_preview_control::{Command, PanelPreviewControl};
+    let dir = std::path::PathBuf::from(std::env::var_os("LINC_DIAG_DIR").expect("isolated simulation diagnostic directory"));
+    let instance = linc_diag::discovery::read_instance(&dir, "panel").unwrap();
+    assert_eq!(instance.build.backend, "sim");
+    assert_eq!(instance.profile, "Smartlathe SL36 Simulation");
+    let get = |pin: &str| {
+        let result = std::process::Command::new("halcmd").args(["getp", pin]).output().unwrap();
+        assert!(result.status.success(), "HAL pin unavailable: {pin}");
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(get("halui.machine.is-on"), "TRUE");
+    assert_eq!(get("halui.joint.0.is-homed"), "TRUE");
+    assert_eq!(get("halui.joint.1.is-homed"), "TRUE");
+    let control = PanelPreviewControl::in_dir(instance.profile, dir);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    control.send(Command::Mode("JOG"));
+    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.profile.variant = MachineVariant::Lathe;
+    harness.app.profile.config.lathe = Some(linc_core::config::LatheConfig {
+        turret_stations: None, power_turret: None, live_tooling: None,
+        live_tool_max_rpm: None, c_axis: None, y_axis: None, sub_spindle: Some(true),
+    });
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 4000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| { ui.set_width(600.0); harness.app.draw_panel_preview(ui); });
+        output.textures_delta.clear();
+        output
+    };
+    let wait_pin = |pin: &str, expected: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while get(pin) != expected {
+            assert!(std::time::Instant::now() < deadline, "{pin} did not become {expected}");
+            draw(vec![]);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_pin("cnc_panel.mode_jog", "TRUE");
+    for (axis, label, direction) in [
+        ("x", "X−", -1.0), ("x", "X+", 1.0),
+        ("z", "Z+", 1.0), ("z", "Z−", -1.0),
+    ] {
+        let position = || get(&format!("halui.axis.{axis}.pos-feedback")).parse::<f64>().unwrap();
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter().find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing {label}")).1.center();
+        let start = position();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        let until = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < until { draw(vec![]); std::thread::sleep(Duration::from_millis(20)); }
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+        std::thread::sleep(Duration::from_millis(400));
+        let stopped = position();
+        std::thread::sleep(Duration::from_millis(300));
+        let later = position();
+        assert!((stopped - start) * direction > 0.01, "{label} did not move: {start} -> {stopped}");
+        assert!((later - stopped).abs() < 0.01, "{label} did not stop: {stopped} -> {later}");
+        eprintln!("{label}: {start:.3} -> {stopped:.3} mm, stopped");
+    }
+    let frame = draw(vec![]);
+    let estop = painted_text(&frame).into_iter().find(|(text, _)| text == "ACTIVATE SIM E-STOP")
+        .expect("simulation E-stop").1.center();
+    draw(vec![egui::Event::PointerMoved(estop), press_at(estop, true)]);
+    draw(vec![egui::Event::PointerMoved(estop), press_at(estop, false)]);
+    wait_pin("halui.estop.is-activated", "TRUE");
+    wait_pin("halui.machine.is-on", "FALSE");
+    eprintln!("lathe E-stop: active, machine off");
+    let disconnected = harness.app.panel_preview_control.as_ref().unwrap().state().disconnected_buttons;
+    let mut verified = 0;
+    for (_, keys) in crate::shell::panel_preview::panel_key_groups(true, true) {
+        for (label, key) in keys {
+            if disconnected.iter().any(|name| name == key) { continue; }
+            let pin = format!("cnc_panel.{key}");
+            let frame = draw(vec![]);
+            let point = painted_text(&frame).into_iter().find(|(text, _)| text == label)
+                .unwrap_or_else(|| panic!("missing {label}")).1.center();
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+            wait_pin(&pin, "TRUE");
+            draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+            wait_pin(&pin, "FALSE");
+            verified += 1;
+            eprintln!("{label}: press and release reached {pin}");
+        }
+    }
+    assert!(verified > 0, "no wired lathe keys were tested");
+    assert_eq!(get("halui.machine.is-on"), "FALSE");
+    eprintln!("{verified} wired lathe keys verified with machine off");
+}
+
+#[test]
+#[ignore = "requires powered, homed LinuxCNC simulation with a long program loaded"]
+fn embedded_cycle_keys_control_real_linuxcnc_program() {
+    use crate::shell::panel_preview_control::{Command, PanelPreviewControl};
+    let dir = std::path::PathBuf::from(std::env::var_os("LINC_DIAG_DIR").expect("isolated simulation diagnostic directory"));
+    let instance = linc_diag::discovery::read_instance(&dir, "panel").unwrap();
+    assert_eq!(instance.build.backend, "sim");
+    assert_eq!(instance.profile, "BaierMill Simulation");
+    let get = |pin: &str| {
+        let result = std::process::Command::new("halcmd").args(["getp", pin]).output().unwrap();
+        assert!(result.status.success(), "HAL pin unavailable: {pin}");
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(get("halui.machine.is-on"), "TRUE");
+    let control = PanelPreviewControl::in_dir(instance.profile, dir);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    control.send(Command::Mode("AUTO"));
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 3000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| { ui.set_width(600.0); harness.app.draw_panel_preview(ui); });
+        output.textures_delta.clear();
+        output
+    };
+    let wait_pin = |pin: &str, expected: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while get(pin) != expected {
+            assert!(std::time::Instant::now() < deadline, "{pin} did not become {expected}");
+            draw(vec![]); std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let click = |label: &str| {
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter().find(|(text, _)| text.ends_with(label))
+            .unwrap_or_else(|| panic!("missing {label}")).1.center();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    };
+    wait_pin("cnc_panel.mode_auto", "TRUE");
+    wait_pin("halui.mode.is-auto", "TRUE");
+    if get("toggle.sbk.out") == "TRUE" {
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter().find(|(text, _)| text == "S.B.K.").unwrap().1.center();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        wait_pin("cnc_panel.sbk", "TRUE");
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+        wait_pin("toggle.sbk.out", "FALSE");
+    }
+    click("CYCLE START");
+    wait_pin("halui.program.is-running", "TRUE");
+    eprintln!("CYCLE START: program running");
+    click("CYCLE STOP");
+    wait_pin("halui.program.is-paused", "TRUE");
+    eprintln!("CYCLE STOP: program paused");
+    click("CYCLE START");
+    wait_pin("halui.program.is-paused", "FALSE");
+    wait_pin("halui.program.is-running", "TRUE");
+    eprintln!("CYCLE START: program resumed");
+    let frame = draw(vec![]);
+    let point = painted_text(&frame).into_iter().find(|(text, _)| text == "K4").unwrap().1.center();
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+    wait_pin("cnc_panel.k4", "TRUE");
+    draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    wait_pin("halui.program.is-idle", "TRUE");
+    eprintln!("K4: program stopped");
+}
+
+#[test]
+#[ignore = "requires powered, homed LinuxCNC mill simulation with spindle speed set"]
+fn embedded_spindle_keys_control_real_linuxcnc_simulation() {
+    use crate::shell::panel_preview_control::{Command, PanelPreviewControl};
+    let dir = std::path::PathBuf::from(std::env::var_os("LINC_DIAG_DIR").expect("isolated simulation diagnostic directory"));
+    let instance = linc_diag::discovery::read_instance(&dir, "panel").unwrap();
+    assert_eq!(instance.build.backend, "sim");
+    assert_eq!(instance.profile, "BaierMill Simulation");
+    let get = |pin: &str| {
+        let result = std::process::Command::new("halcmd").args(["getp", pin]).output().unwrap();
+        assert!(result.status.success(), "HAL pin unavailable: {pin}");
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(get("halui.machine.is-on"), "TRUE");
+    let control = PanelPreviewControl::in_dir(instance.profile, dir);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    control.send(Command::Mode("JOG"));
+    let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut input = probe_raw_input(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 3000.0)));
+        let mut output = harness.ctx.run_ui(input, |ui| { ui.set_width(600.0); harness.app.draw_panel_preview(ui); });
+        output.textures_delta.clear();
+        output
+    };
+    let wait_pin = |pin: &str, expected: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while get(pin) != expected {
+            assert!(std::time::Instant::now() < deadline, "{pin} did not become {expected}");
+            draw(vec![]); std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_pin("cnc_panel.mode_jog", "TRUE");
+    for (label, key, status, expected) in [
+        ("SPD.CW", "spd_cw", "halui.spindle.0.runs-forward", "TRUE"),
+        ("SPD.SP", "spd_sp", "halui.spindle.0.is-on", "FALSE"),
+        ("SPD.CCW", "spd_ccw", "halui.spindle.0.runs-backward", "TRUE"),
+        ("SPD.SP", "spd_sp", "halui.spindle.0.is-on", "FALSE"),
+    ] {
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter().find(|(text, _)| text == label).unwrap().1.center();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        wait_pin(&format!("cnc_panel.{key}"), "TRUE");
+        std::thread::sleep(Duration::from_millis(100));
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+        wait_pin(&format!("cnc_panel.{key}"), "FALSE");
+        wait_pin(status, expected);
+        eprintln!("{label}: {status} = {expected}");
+    }
+}
+
+#[test]
+#[ignore = "requires a fresh isolated LinuxCNC mill simulation in E-stop"]
+fn embedded_power_keys_control_real_linuxcnc_simulation() {
+    use crate::shell::panel_preview_control::PanelPreviewControl;
+    let dir = std::path::PathBuf::from(std::env::var_os("LINC_DIAG_DIR").expect("isolated simulation diagnostic directory"));
+    let instance = linc_diag::discovery::read_instance(&dir, "panel").unwrap();
+    assert_eq!(instance.build.backend, "sim");
+    assert_eq!(instance.profile, "BaierMill Simulation");
+    let get = |pin: &str| {
+        let result = std::process::Command::new("halcmd").args(["getp", pin]).output().unwrap();
+        assert!(result.status.success(), "HAL pin unavailable: {pin}");
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(get("cnc_panel.estop"), "TRUE");
+    assert_eq!(get("halui.machine.is-on"), "FALSE");
+    let control = PanelPreviewControl::in_dir(instance.profile, dir);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !control.state().ready { assert!(std::time::Instant::now() < deadline); std::thread::sleep(Duration::from_millis(10)); }
+    let mut harness = ProbeHarness::new(PanelMode::Auto, false, true);
+    harness.app.panel_preview_control = Some(control);
+    let draw = |events| {
+        let mut output = harness.ctx.run_ui(probe_raw_input(events), |ui| { ui.set_width(260.0); harness.app.draw_panel_preview(ui); });
+        output.textures_delta.clear();
+        output
+    };
+    let click = |label: &str| {
+        let frame = draw(vec![]);
+        let point = painted_text(&frame).into_iter().find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing {label}")).1.center();
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, true)]);
+        draw(vec![egui::Event::PointerMoved(point), press_at(point, false)]);
+    };
+    let wait_pin = |pin: &str, expected: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while get(pin) != expected {
+            assert!(std::time::Instant::now() < deadline, "{pin} did not become {expected}");
+            draw(vec![]); std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    click("RELEASE SIM E-STOP");
+    wait_pin("cnc_panel.estop", "FALSE");
+    wait_pin("halui.estop.is-activated", "FALSE");
+    assert_eq!(get("halui.machine.is-on"), "FALSE");
+    eprintln!("E-stop released, machine remains off");
+    click("POWER ON");
+    wait_pin("halui.machine.is-on", "TRUE");
+    eprintln!("POWER ON: machine on");
+    click("POWER OFF");
+    wait_pin("halui.machine.is-on", "FALSE");
+    eprintln!("POWER OFF: machine off");
 }

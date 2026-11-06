@@ -571,251 +571,140 @@ impl LincApp {
     }
 
     pub(super) fn draw_nav(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("NAVIGATION")
-                .size(theme::font_size(10.0))
-                .color(theme::MUTED),
-        );
-        ui.add_space(4.0);
-        // Copied out: the loop body navigates, which borrows `self` mutably.
-        let nav = self.nav.pages.clone();
-        // The rows carry their own gap: the list spacing the sidebar inherits
-        // is 8 px a row, which put a band of dead space around every entry.
-        ui.spacing_mut().item_spacing.y = theme::NAV_ROW_GAP;
-        for (index, page) in nav.iter().enumerate() {
-            let Some((_, label, keycap)) = NAV_ITEMS.iter().find(|(entry, _, _)| entry == page)
-            else {
-                continue;
-            };
-            // Copied out of the const: the row prints either the panel keycap
-            // or the binding a normal keyboard sends.
-            let keycap = nav_keycap(self, *page, keycap);
-            // TOUCH PROBE is a subpage of OFFSETS; keep the parent marked in
-            // the sidebar instead of leaving no entry highlighted.
-            let selected =
-                *page == self.nav.page || (*page == Page::Offsets && self.nav.page == Page::Probe);
-            let focused = self.nav.focus_region == FocusRegion::Nav && self.nav.nav_focus == index;
-            let geometry = nav_row_geometry(*page);
-            // The gap belongs to the row being entered, so DIAG and G-CODE
-            // use their tighter gap without changing the primary rows above.
-            ui.spacing_mut().item_spacing.y = geometry.gap;
-            // The target every row keeps, whatever it paints inside it.
-            let (rect, response) = ui.allocate_exact_size(
-                Vec2::new(theme::NAV_WIDTH - 20.0, geometry.height),
-                Sense::click(),
-            );
-            let pill =
-                egui::Rect::from_center_size(rect.center(), Vec2::new(rect.width(), geometry.pill));
-            let painter = ui.painter();
-            painter.rect_filled(
-                pill,
-                4,
-                if selected {
-                    theme::ACCENT
-                } else if focused {
-                    theme::PANEL_RAISED
-                } else {
-                    theme::SURFACE
-                },
-            );
-            if focused {
-                painter.rect_stroke(
-                    pill.expand(1.0),
-                    5,
-                    Stroke::new(2.0, theme::ACCENT),
-                    StrokeKind::Outside,
-                );
-            }
-            let icon_color = if selected {
-                Color32::from_rgb(0x0b, 0x17, 0x22)
-            } else {
-                theme::MUTED
-            };
-            if geometry.icon {
-                draw_nav_icon(
-                    painter,
-                    egui::Rect::from_min_size(
-                        egui::pos2(rect.left() + 8.0, rect.center().y - 9.0),
-                        Vec2::splat(18.0),
-                    ),
-                    *page,
-                    icon_color,
-                );
-            }
-            // A row with an icon holds its label and keycap on two lines beside
-            // it; a one-line row starts at the pill's own inset, with no icon
-            // to clear.
-            let label_x = rect.left() + if geometry.icon { 34.0 } else { 12.0 };
-            // Only a row with an icon is a two-line row. The secondary rows
-            // carry a [keys] hint too, and painting it under the label is what
-            // kept DIAGNOSTICS and G-CODE HELP two lines tall.
-            let two_line = geometry.icon && !keycap.is_empty();
-            let label_y = if two_line {
-                rect.center().y - 6.0
-            } else {
-                rect.center().y
-            };
-            painter.text(
-                egui::pos2(label_x, label_y),
-                Align2::LEFT_CENTER,
-                *label,
-                FontId::proportional(theme::font_size(11.0)),
-                if selected {
-                    Color32::from_rgb(0x0b, 0x17, 0x22)
-                } else {
-                    theme::FG
-                },
-            );
-            if two_line {
-                painter.text(
-                    egui::pos2(label_x, rect.center().y + 7.0),
-                    Align2::LEFT_CENTER,
-                    keycap.as_str(),
-                    FontId::monospace(theme::font_size(8.5)),
-                    if selected {
-                        Color32::from_rgb(0x0b, 0x17, 0x22)
-                    } else {
-                        theme::MUTED
-                    },
-                );
-            } else if !keycap.is_empty() {
-                // A one-line row carries its chord at the pill's right edge, so
-                // label and hint share the row instead of stacking: the labels
-                // are short enough (DIAG, G-CODE) for both to fit.
-                painter.text(
-                    egui::pos2(rect.right() - 12.0, rect.center().y),
-                    Align2::RIGHT_CENTER,
-                    keycap.as_str(),
-                    FontId::monospace(theme::font_size(8.5)),
-                    if selected {
-                        Color32::from_rgb(0x0b, 0x17, 0x22)
-                    } else {
-                        theme::MUTED
-                    },
-                );
-            }
-            if response.clicked() {
-                ui.memory_mut(|memory| memory.stop_text_input());
-                // A nav click is the operator leaving whichever text field had
-                // the keyboard. Without this the G-code editor kept focus (the
-                // panel keyboard has no Tab), so the toolpath's pan chords and
-                // the page keys stayed dead after navigating, while the nav row
-                // drew its focus border and looked ready for the arrows.
-                self.nav.nav_focus = index;
-                self.nav.focus_region = FocusRegion::Nav;
-                self.request_nav_page(*page);
-            }
-        }
-        // Minimal: the list ends where the rows do, and the SHORTCUTS frame
-        // takes the rest of the column.
-        ui.spacing_mut().item_spacing.y = theme::NAV_ROW_GAP;
-        ui.add_space(theme::NAV_BOTTOM_GAP);
-        theme::separator(ui);
-        ui.add_space(theme::NAV_BOTTOM_GAP);
-        // Page-local keyboard commands live here: the bottom bar had one row and
-        // truncated the list, and the sidebar has the height. The list takes the
-        // sidebar's remainder, less the frame's own margins and header.
-        //
-        // The pane gives the list every pixel the sidebar has left and scrolls
-        // inside when the list is longer than that; a list that fits keeps the
-        // frame at its content height. `available_height` is read here, outside
-        // the frame, where the column really bounds it.
-        let header = ui.fonts_mut(|fonts| {
-            fonts
-                .layout_no_wrap(
-                    "SHORTCUTS".to_string(),
-                    FontId::proportional(theme::font_size(9.0)),
-                    theme::MUTED,
-                )
-                .size()
-                .y
-        });
-        // The frame's 6 px margin and 1 px stroke on each side, the header line
-        // above the list, and the air that keeps the frame off the footer.
-        const FRAME_CHROME: f32 = 6.0 * 2.0 + 1.0 * 2.0;
-        const FOOTER_PAD: f32 = 4.0;
-        let list_height = (ui.available_height() - FRAME_CHROME - header - FOOTER_PAD).max(60.0);
         let shortcuts = self.key_hints();
-        if !shortcuts.is_empty() {
-            Frame::new()
-                .fill(theme::PANEL)
-                .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(4)
-                .inner_margin(Margin::same(6))
-                .show(ui, |ui| {
-                    // The list can be longer than the sidebar: scroll it, and keep
-                    // the safety note under it on screen.
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(
-                        RichText::new("SHORTCUTS")
-                            .size(theme::font_size(9.0))
-                            .strong()
-                            .color(theme::MUTED),
-                    );
-                    egui::ScrollArea::vertical()
-                        .id_salt("sidebar-shortcuts")
-                        .max_height(list_height)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            // Half a text line between entries: the rows are dense enough
-                            // to read as a list, with air that does not waste the pane.
-                            let hint_line = ui
-                                .painter()
-                                .layout_no_wrap(
-                                    "Ag".to_string(),
-                                    egui::FontId::monospace(theme::font_size(9.0)),
-                                    theme::MUTED,
-                                )
-                                .size()
-                                .y;
-                            for group in shortcuts.iter() {
-                                if !group.title.is_empty() {
-                                    // Also before the first title: the pane header is not a
-                                    // group, and the first one was sitting right under it.
-                                    ui.add_space(hint_line * 0.5);
-                                    ui.label(
-                                        RichText::new(group.title)
-                                            .size(theme::font_size(8.0))
-                                            .strong()
-                                            .color(theme::MUTED),
-                                    );
-                                    ui.add_space(hint_line * 0.35);
-                                }
-                                for (index, (key, action)) in group.items.iter().enumerate() {
-                                    // One line per command, exactly; `ui.horizontal`
-                                    // inherited the 44 px touch target and left large air
-                                    // between two 9 pt rows.
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(ui.available_width(), hint_line),
-                                        Layout::left_to_right(Align::Center),
-                                        |ui| {
-                                            ui.label(
-                                                RichText::new(key.clone())
-                                                    .monospace()
-                                                    .size(theme::font_size(9.0))
-                                                    .color(theme::C3),
-                                            );
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    ui.label(
-                                                        RichText::new(*action)
-                                                            .size(theme::font_size(9.0))
-                                                            .color(theme::MUTED),
-                                                    );
-                                                },
-                                            );
-                                        },
-                                    );
-                                    if index + 1 < group.items.len() {
-                                        ui.add_space(hint_line * 0.5);
-                                    }
-                                }
+        // Reserve the right edge for the menu; navigation can scroll on narrow windows.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().interact_size.y = theme::MIN_TARGET;
+            let (menu_rect, menu_response) =
+                ui.allocate_exact_size(Vec2::new(120.0, theme::MIN_TARGET), Sense::CLICK);
+            ui.painter()
+                .rect_filled(menu_rect.shrink(2.0), 4, theme::PANEL_RAISED);
+            ui.painter().text(
+                menu_rect.center(),
+                Align2::CENTER_CENTER,
+                "SHORTCUTS ▾",
+                FontId::proportional(theme::font_size(10.0)),
+                theme::FG,
+            );
+            egui::Popup::menu(&menu_response).show(|ui| {
+                ui.set_min_width(220.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("navigation-shortcuts")
+                    .max_height(500.0)
+                    .show(ui, |ui| {
+                        for group in &shortcuts {
+                            if !group.title.is_empty() {
+                                ui.add_space(5.0);
+                                ui.label(
+                                    RichText::new(group.title)
+                                        .size(theme::font_size(8.0))
+                                        .strong()
+                                        .color(theme::MUTED),
+                                );
                             }
-                        });
+                            for (key, action) in &group.items {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(key)
+                                            .monospace()
+                                            .size(theme::font_size(9.0))
+                                            .color(theme::C3),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new(*action)
+                                                .size(theme::font_size(9.0))
+                                                .color(theme::MUTED),
+                                        );
+                                    });
+                                });
+                            }
+                        }
+                    });
+            });
+            egui::ScrollArea::horizontal()
+                .id_salt("navigation-tabs")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        for (index, page) in self.nav.pages.clone().iter().enumerate() {
+                            let Some((_, label, keycap)) =
+                                NAV_ITEMS.iter().find(|(entry, _, _)| entry == page)
+                            else {
+                                continue;
+                            };
+                            let keycap = nav_keycap(self, *page, keycap);
+                            let selected = *page == self.nav.page
+                                || (*page == Page::Offsets && self.nav.page == Page::Probe);
+                            let focused = self.nav.focus_region == FocusRegion::Nav
+                                && self.nav.nav_focus == index;
+                            let width = (theme::measure(ui, label, 11.0)
+                                .max(theme::measure(ui, &keycap, 8.5))
+                                + 38.0)
+                                .max(100.0);
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(width, theme::MIN_TARGET),
+                                Sense::CLICK,
+                            );
+                            let painter = ui.painter();
+                            painter.rect_filled(
+                                rect.shrink2(Vec2::new(0.0, 2.0)),
+                                4,
+                                if selected {
+                                    theme::ACCENT
+                                } else if focused {
+                                    theme::PANEL_RAISED
+                                } else {
+                                    theme::SURFACE
+                                },
+                            );
+                            if focused {
+                                painter.rect_stroke(
+                                    rect.shrink2(Vec2::new(0.0, 2.0)),
+                                    4,
+                                    Stroke::new(2.0, theme::ACCENT),
+                                    StrokeKind::Inside,
+                                );
+                            }
+                            let color = if selected {
+                                Color32::from_rgb(0x0b, 0x17, 0x22)
+                            } else {
+                                theme::FG
+                            };
+                            draw_nav_icon(
+                                painter,
+                                egui::Rect::from_center_size(
+                                    egui::pos2(rect.left() + 15.0, rect.center().y),
+                                    Vec2::splat(18.0),
+                                ),
+                                *page,
+                                color,
+                            );
+                            painter.text(
+                                egui::pos2(rect.left() + 29.0, rect.center().y - 7.0),
+                                Align2::LEFT_CENTER,
+                                *label,
+                                FontId::proportional(theme::font_size(11.0)),
+                                color,
+                            );
+                            painter.text(
+                                egui::pos2(rect.left() + 29.0, rect.center().y + 8.0),
+                                Align2::LEFT_CENTER,
+                                &keycap,
+                                FontId::monospace(theme::font_size(8.5)),
+                                if selected { color } else { theme::MUTED },
+                            );
+                            if response.clicked() {
+                                ui.memory_mut(|memory| memory.stop_text_input());
+                                self.nav.nav_focus = index;
+                                self.nav.focus_region = FocusRegion::Nav;
+                                self.request_nav_page(*page);
+                            }
+                        }
+                    });
                 });
-        }
+        });
     }
 }
 

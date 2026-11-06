@@ -1,0 +1,67 @@
+en_term	tr_tercih	tr_kisa	kural	yasakli_karsiliklar	not
+Spindle	Spindle	SPINDLE	keep_en	fener mili, iş mili	Atölyede herkes spindle der; fener mili veya iş mili arayüzde calque ve yapay kalır.
+Rapid	Rapid	RAPID	keep_en	hızlı, çabuk, acele	G0 boşta hızlı pozisyonlama; operatör her zaman 'rapid' veya 'rapid hareket' der. 'Hızlı' yasak.
+Feed	Feed	FEED	keep_en	besleme, yem, doyurma	Kesme ilerlemesi; buton ve sütunda FEED veya İlerleme. 'Besleme' kesinlikle yasak.
+Jog	Jog	JOG	keep_en	elle sürme, dürtme, adım	Eksenleri manuel hareket ettirme modu. 'Elle sürme' veya 'dürtme' kullanılmaz.
+Probe	Probe	PROBE	keep_en	dokunmaç, sonda, yoklayıcı	3D temaslı prob; buton ve sekmede PROBE veya PROB. 'Dokunmaç/sonda' yasak.
+Override	Override	OVR	keep_en	geçersiz kılma, ezme, baskılama	Feed ve Spindle hız çarpanı potansı. Operatör 'override' der.
+Offset	Offset	OFFSET	keep_en	öteleme, sapma, kaçıklık	İş koordinat ofseti (G54-G59) veya takım boy ofseti (TLO).
+Home	Home	HOME	keep_en	ev, sıfır, başlangıç	Makine sıfırına referanslama (G28). 'Ev' kelimesi kesinlikle yasak.
+G-code	G-Kodu	G-KODU	translate	g kodu, g-kod	G-Kodu veya G-code olarak yazılır; tokenlar (G0, G1, M3) asla çevrilmez.
+TLO	TLO	TLO	keep_en	takım boyu telafisi, alet uzunluk ofseti	Tool Length Offset; standart DRO kısaltmasıdır, değiştirilmez.
+Tool	Takım	TAKIM	translate	alet, edevat, çakı	CNC freze/torna kesici takımı; Türk sanayisinde evrensel terim 'takım'dır.
+Toolpath	Takım Yolu	YOL	translate	alet yolu, takım izi	Takımın işleme rotası.
+Stock	Ham Parça	HAM PARÇA	translate	kütük, blok	İşlenecek hammadde; kalıpçı ve operatör 'ham parça' veya 'stok' der. 'Kütük' kesinlikle yasak.
+Workpiece	İş Parçası	PARÇA	translate	çalışma parçası, kütük	İşlenen mekanik parça.
+Limits	Strok Limiti	STROK	translate	seyahat limiti, gezinme sınırı	Eksen hareket/strok sınırları (soft/hard limits). 'Seyahat limiti' kesinlikle yasak.
+Workplane	Çalışma Düzlemi	DÜZLEM	translate	iş düzlemi, seyahat düzlemi	G17 (XY), G18 (ZX), G19 (YZ) aktif koordinat düzlemi.
+Coolant	Soğutma	SOĞUTMA	translate	soğutucu sıvı, bor yağı	M8/M9 soğutma sıvısı / bor yağı.
+E-Stop	Acil Stop	ACİL STOP	translate	acil durdurma, e-stop	Acil durdurma emniyet mantarı.
+Cycle	Çevrim	ÇEVRİM	translate	döngü, periyot	Delik delme çevrimi (G81, G83) veya işleme periyodu.
+Dwell	Bekleme	BEKLEME	translate	duraklama, oyalanma	G4 bekleme süresi (dwell time).
+MDI	MDI	MDI	keep_en	manuel veri girişi	Manual Data Input; CNC ekranında standart mod adı.
+DRO	DRO	DRO	keep_en	sayısal okuyucu, dijital gösterge	Digital Read Out; eksen koordinat ekranı.
+WCS	WCS	WCS	keep_en	iş koordinat sistemi	Work Coordinate System (G54, G55 vb.).
+DTG	DTG	DTG	keep_en	gidilecek mesafe, hedefe kalan	Distance-To-Go; eksen bazında hedefe kalan mesafe.
+Velocity	Anlık Hız	HIZ	translate	hız, sürat, hızlanma	Takımın mm/dak veya mm/sn cinsinden o andaki bileşke hızı.
+RPM	Devir	DEVİR	translate	rpm, dakika devri	Spindle dakikadaki devir sayısı (RPM).
+Cut Distance	Kesim Mesafesi	KESİM	translate	kesme mesafesi, paso mesafesi	G1/G2/G3 işleme hareketlerinin toplam mesafesi.
+Rapid Distance	Rapid Mesafesi	RAPID	keep_en	hızlı hareket mesafesi	G0 boşta rapid hareketlerin toplam mesafesi.
+Estimated Time	Tahmini Süre	TAHMİNİ	translate	kalan süre, bitiş süresi	Programın hesaplanan tahmini toplam işleme süresi.
+Elapsed Time	Geçen Süre	GEÇEN	translate	harcanan zaman	Programın başlamasından bu yana geçen süre.
+Remaining Time	Kalan Süre	KALAN	translate	kalan zaman, eksik süre	Programın bitmesine kalan tahmini süre.
+Endmill	Parmak Freze	PARMAK	translate	düz freze, silindirik freze	Düz uçlu standart silindirik freze takımı.
+Ballend	Küre Freze	KÜRE	translate	top kafa freze, bilyeli freze	Küre uçlu kopya/yüzey işleme frezesi (ballnose).
+Chamfer	Pah Frezesi	PAH	translate	pah kırma ucu, açı frezesi	Pah kırma ve havşa açma frezesi.
+Dovetail	Kırlangıç Freze	KIRLANGIÇ	translate	kırlangıç kuyruğu çakısı	Kırlangıç kanalı açma frezesi.
+Drill	Matkap	MATKAP	translate	delgi, delici uç	Standart helis delik matkabı.
+Probe Tool	3D Prob	PROB	keep_en	dokunmaç takımı	İş parçası sıfırlama ve parça ölçüm probu.
+Reamer	Rayba	RAYBA	translate	genişletici, hassas rayba	Hassas delik büyütme ve kalibre etme takımı.
+Slittingsaw	Kanal Testeresi	TESTERE	translate	yarık testeresi, dilme testeresi	Kanal ve yarık açma testere frezesi.
+Threadmill	Diş Frezesi	DİŞ	translate	vida frezesi, kılavuz freze	İç/dış diş ve vida açma frezesi.
+Torus	Köşe Radyüslü Freze	TORUS	translate	boğa burun freze, torus freze	Köşe radyüslü parmak freze (bullnose/torus).
+V-bit	V-Kanal Çakısı	V-BIT	keep_en	v çakı, v kesici	Gravür, yazı ve pah için V uçlu konik freze.
+Lathe Tool	Torna Kateri	KATER	translate	torna kalemi, torna bıçağı	CNC torna kateri / ucu.
+Box Stock	Kutu Ham Parça	KUTU	translate	kutu kütük, prizma kütük	Prizmatik hammadde/stok geometrisi.
+Cylinder Stock	Silindir Ham Parça	SİLİNDİR	translate	silindirik kütük	Dolu yuvarlak çubuk hammadde/stok geometrisi.
+Tube Stock	Boru Ham Parça	BORU	translate	boru kütük, içi boş kütük	İçi boş dairesel boru veya bilezik hammadde geometrisi.
+Isometric	İzometrik	İZO	translate	üç boyutlu, perspektif	3D izometrik kamera bakış açısı.
+Top View	Üst Görünüm	ÜST	translate	tepe görünüm, yukarı	XY düzlemine yukarıdan dik bakış.
+Bottom View	Alt Görünüm	ALT	translate	aşağıdan görünüm	XY düzlemine aşağıdan bakış.
+Front View	Ön Görünüm	ÖN	translate	karşıdan görünüm	XZ düzlemine karşıdan bakış.
+Back View	Arka Görünüm	ARKA	translate	geriden görünüm	XZ düzlemine arkadan bakış.
+Right View	Sağ Görünüm	SAĞ	translate	sağ taraf görünüm	YZ düzlemine sağdan bakış.
+Left View	Sol Görünüm	SOL	translate	sol taraf görünüm	YZ düzlemine soldan bakış.
+Fit to View	Modele Sığdır	SIĞDIR	translate	ekrana uydur, ortala	Takım yolunu ve iş parçasını ekrana ortalayarak sığdırma.
+Reset View	Görünümü Sıfırla	SIFIRLA	translate	başlangıç konumu	Kamera açısını ve zumu fabrika varsayılanına döndürme.
+Live Toolpath	Canlı Takım Yolu	CANLI	translate	canlı alet yolu, gerçek zamanlı yol	Tezgâh işlerken o anda kesilen dinamik takım yolu.
+Drag to Orbit	Çevirmek İçin Sürükleyin	DÖNDÜR	translate	yörüngede çevir, döndür	3D görünümde fare ile döndürme ipucu.
+Line Number	Satır	SATIR	translate	çizgi no, sıra no	G-kodu satır numarası (N123 veya LN 123).
+
+E-stop Active	Acil Stop Devrede	ESTOP	keep_en	acil durdurma devrede	Acil stop butonu basılı durum rozeti.
+Limits Override Active	Limit Baypas Aktif	LİMİT OVR	keep_en	seyahat limiti iptal	Eksen sınır anahtarı baypas durum rozeti.
+Probe Trip Active	Prob Temas Hatası	PROB TEMAS	keep_en	dokunmaç hatası	3D prob kaza/temas hatası rozeti; tıklandığında sıfırlar.
+Panel Offline	Panel Bağlantısı Koptu	PANEL KOPTU	keep_en	panel çevrimdışı	Operatör paneli bağlantı kopma rozeti.
+Program Protect	Program Kilidi Açık	KİLİT	translate	koruma açık	Program ve ofset veri yazma koruma kilidi rozeti.
+Program External Change	Program Harici Değişti	DIŞ DEĞİŞİM	translate	dış değişiklik	NC dosyasının dışarıdan değiştirilme uyarı rozeti.
+No Program Loaded	Program Yüklü Değil	PROGRAM YOK	translate	program kütüğü yok	Tezgâhta henüz bir G-kodu programı yüklü olmadığında gösterilen durum etiketi.

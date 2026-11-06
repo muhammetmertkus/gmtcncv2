@@ -20,8 +20,10 @@ pub fn show(app: &mut LincApp, ui: &mut Ui) {
 }
 
 fn mill(app: &mut LincApp, ui: &mut Ui) {
-    common::axis_cards(app, ui);
-    ui.add_space(6.0);
+    if app.show_dro_cards {
+        common::axis_cards(app, ui);
+        ui.add_space(6.0);
+    }
 
     let available = ui.available_width();
     let page_height = (ui.ctx().input(|input| input.viewport_rect().bottom())
@@ -173,11 +175,10 @@ fn graph_panel(app: &mut LincApp, ui: &mut Ui, height: f32) {
             ui.set_min_width(ui.available_width());
             ui.spacing_mut().interact_size.y = 14.0;
             ui.spacing_mut().item_spacing.y = 0.0;
+            ui.set_min_height(height);
             ui.set_max_height(height);
-            // One legend implementation for every toolpath card: the
-            // main window had its own copy, which is why its tool key was a
-            // circle while the others were already a triangle.
-            let header = common::toolpath_header(ui, app.graph_style.remaining);
+            // Header toolbar with interactive layer toggles and view presets
+            let header = common::toolpath_header(app, ui);
             let mut zoom = app.program.graph_zoom;
             let mut pan = app.program.graph_pan;
             let mut yaw = app.program.graph_yaw;
@@ -188,7 +189,7 @@ fn graph_panel(app: &mut LincApp, ui: &mut Ui, height: f32) {
                 app,
                 ui,
                 &preview,
-                (height - 36.0).max(120.0),
+                (height - 52.0).max(100.0),
                 view,
                 &mut zoom,
                 &mut pan,
@@ -205,12 +206,19 @@ fn graph_panel(app: &mut LincApp, ui: &mut Ui, height: f32) {
                 false,
                 None,
             );
+            if drawn.view_mode != view {
+                app.program.graph_view = drawn.view_mode;
+            }
             app.program.graph_zoom = zoom;
             app.program.graph_pan = pan;
             app.program.graph_yaw = yaw;
             app.program.graph_pitch = pitch;
             app.program.fit_requested = false;
             app.program.graph_auto_fit = auto_fit;
+            if let Some(picked) = drawn.picked_line {
+                app.program.selected_line = picked;
+                app.program.code_scroll_to_line = Some(picked);
+            }
             common::toolpath_status(ui, header, view.label(), drawn.span_mm);
             // The block the MDI pane is composing, drawn over the program in
             // the pane's own colour. Nothing is drawn for an empty or
@@ -226,17 +234,30 @@ fn graph_panel(app: &mut LincApp, ui: &mut Ui, height: f32) {
                 pitch,
             );
             ui.horizontal(|ui| {
-                let program = if app.snapshot.program.display_name.is_empty() {
-                    "NO PROGRAM".to_string()
-                } else {
+                let has_program = !app.snapshot.program.display_name.is_empty();
+                let program_label = if has_program {
                     app.snapshot.program.display_name.clone()
+                } else {
+                    linc_core::i18n::t("viewport.status.no_program").to_string()
                 };
-                ui.label(
-                    RichText::new(program)
-                        .monospace()
-                        .size(theme::font_size(9.0))
-                        .color(theme::MUTED),
+                let p_label = ui.add(
+                    egui::Label::new(
+                        RichText::new(&program_label)
+                            .monospace()
+                            .size(theme::font_size(9.0))
+                            .color(if has_program { theme::ACCENT } else { theme::MUTED }),
+                    )
+                    .sense(egui::Sense::hover()),
                 );
+                if has_program {
+                    p_label.on_hover_text(format!(
+                        "{}: {}",
+                        linc_core::i18n::t("viewport.status.program_tooltip"),
+                        app.snapshot.program.display_name
+                    ));
+                } else {
+                    p_label.on_hover_text(linc_core::i18n::t("viewport.status.no_program_tooltip"));
+                }
                 // The loop the run is in, in the same words as the PROGRAM
                 // page's status line. Dropped first when the card is narrow:
                 // the listing carries it too.
@@ -284,8 +305,10 @@ fn graph_panel(app: &mut LincApp, ui: &mut Ui, height: f32) {
 }
 
 fn lathe(app: &mut LincApp, ui: &mut Ui) {
-    common::axis_cards(app, ui);
-    ui.add_space(6.0);
+    if app.show_dro_cards {
+        common::axis_cards(app, ui);
+        ui.add_space(6.0);
+    }
     let available = ui.available_width();
     let page_height = (ui.ctx().input(|input| input.viewport_rect().bottom())
         - theme::BOTTOM_BAR_HEIGHT
@@ -324,7 +347,7 @@ fn lathe(app: &mut LincApp, ui: &mut Ui) {
                     let mut pitch = app.program.graph_pitch;
                     let mut fit = app.program.fit_requested;
                     let mut auto_fit = app.program.graph_auto_fit;
-                    let response = common::trajectory(
+                    let drawn = common::trajectory(
                         app,
                         ui,
                         &preview,
@@ -344,8 +367,12 @@ fn lathe(app: &mut LincApp, ui: &mut Ui) {
                         false,
                         false,
                         None,
-                    )
-                    .response;
+                    );
+                    let response = drawn.response;
+                    if let Some(picked) = drawn.picked_line {
+                        app.program.selected_line = picked;
+                        app.program.code_scroll_to_line = Some(picked);
+                    }
                     app.program.graph_zoom = zoom;
                     app.program.graph_pan = pan;
                     app.program.graph_yaw = yaw;

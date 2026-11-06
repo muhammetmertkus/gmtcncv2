@@ -180,7 +180,7 @@ fn graph_card(app: &mut LincApp, ui: &mut Ui, rect: egui::Rect, kind: ViewKind) 
                 common::card_title(ui, "PATH");
                 None
             }
-            ViewKind::Full => Some(common::toolpath_header(ui, app.graph_style.remaining)),
+            ViewKind::Full => Some(common::toolpath_header(app, ui)),
         };
         // Measured from the cursor: `min_rect` already holds the minimum size
         // the shell set, so it would report the whole card as the header and
@@ -221,6 +221,13 @@ fn graph_card(app: &mut LincApp, ui: &mut Ui, rect: egui::Rect, kind: ViewKind) 
         );
         if let Some(header) = header {
             common::toolpath_status(ui, header, view.label(), drawn.span_mm);
+        }
+        if let Some(picked) = drawn.picked_line {
+            app.program.selected_line = picked;
+            app.program.code_scroll_to_line = Some(picked);
+        }
+        if drawn.view_mode != view {
+            app.program.graph_view = drawn.view_mode;
         }
         app.program.graph_zoom = zoom;
         app.program.graph_pan = pan;
