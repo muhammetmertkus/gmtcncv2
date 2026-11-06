@@ -7586,6 +7586,15 @@ fn every_lathe_matrix_button_responds_to_pointer_press_and_release() {
         live_tool_max_rpm: None, c_axis: None, y_axis: None, sub_spindle: Some(true),
     });
     harness.app.panel_preview_control = Some(control);
+    // A profile asking for a sub-spindle must not invent one absent from INI.
+    let mut input = probe_raw_input(vec![]);
+    input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 4000.0)));
+    let mut mismatch = harness.ctx.run_ui(input, |ui| { ui.set_width(600.0); harness.app.draw_panel_preview(ui); });
+    let labels = painted_text(&mismatch);
+    mismatch.textures_delta.clear();
+    assert!(labels.iter().any(|(text, _)| text == "SECOND SPINDLE: PROFILE AND INI DISAGREE"));
+    assert!(!labels.iter().any(|(text, _)| text == "SPD.2.CW"));
+    harness.app.profile.machine_ini.spindles = 2;
     let draw = |events| {
         let mut input = probe_raw_input(events);
         input.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 4000.0)));
@@ -7939,6 +7948,7 @@ fn embedded_lathe_wired_keys_reach_real_linuxcnc_hal() {
     control.send(Command::Mode("JOG"));
     let mut harness = ProbeHarness::new(PanelMode::Jog, false, true);
     harness.app.profile.variant = MachineVariant::Lathe;
+    harness.app.profile.machine_ini.spindles = 2;
     harness.app.profile.config.lathe = Some(linc_core::config::LatheConfig {
         turret_stations: None, power_turret: None, live_tooling: None,
         live_tool_max_rpm: None, c_axis: None, y_axis: None, sub_spindle: Some(true),

@@ -107,6 +107,28 @@ pub struct NmlBackend {
 /// interpreted against the previous one.
 const TOOL_TABLE_LOAD_TIMEOUT: Duration = Duration::from_millis(1500);
 
+#[derive(Debug, PartialEq, Eq)]
+enum SimRestoreAction { Complete, Superseded, Wait, Request }
+
+fn sim_restore_action(
+    previous: NmlTaskMode, observed: NmlTaskMode, selected: Option<NmlTaskMode>,
+    idle: bool, quiet_at: &mut Option<Instant>, now: Instant,
+) -> SimRestoreAction {
+    if observed == previous { *quiet_at = None; return SimRestoreAction::Complete; }
+    if selected.is_some_and(|mode| mode != previous) {
+        *quiet_at = None;
+        return SimRestoreAction::Superseded;
+    }
+    if !idle || selected.is_none() { *quiet_at = None; return SimRestoreAction::Wait; }
+    let since = *quiet_at.get_or_insert(now);
+    if now.checked_duration_since(since).is_some_and(|elapsed| elapsed >= Duration::from_millis(400)) {
+        *quiet_at = None;
+        SimRestoreAction::Request
+    } else {
+        SimRestoreAction::Wait
+    }
+}
+
 /// What the handshake after a `LoadToolTable` saw.
 enum ToolTableLoad {
     /// The controller published the row the file holds.
@@ -515,11 +537,6 @@ impl NmlBackend {
             return;
         };
         if self.profile.config.machine.kind == "sim" {
-            if status.task.mode == previous {
-                self.pending_restore = None;
-                self.sim_restore_quiet_at = None;
-                return;
-            }
             // Respect a changed selector; do not restore a stale mode over a
             // newer explicit AUTO or MDI request.
             let selected = match panel.mode.mode() {
@@ -529,24 +546,19 @@ impl NmlBackend {
                 Some(PanelMode::Edit | PanelMode::ProgHome) => Some(previous),
                 _ => None,
             };
-            if selected.is_some_and(|mode| mode != previous) {
-                self.pending_restore = None;
-                self.sim_restore_quiet_at = None;
-                return;
-            }
             let idle = panel.connected && !panel.communication_error && selected.is_some()
                 && status.task.state == NmlTaskState::On
                 && status.task.interp_state == linuxcnc_nml::InterpState::Idle
                 && !status.motion.probing && status.motion.inpos && !status.io.jogging_active
                 && self.sim_jog_keys_released();
-            if !idle {
-                self.sim_restore_quiet_at = None;
-                return;
-            }
             let now = Instant::now();
-            let since = *self.sim_restore_quiet_at.get_or_insert(now);
-            if now.duration_since(since) < Duration::from_millis(400) {
-                return;
+            match sim_restore_action(previous, status.task.mode, selected, idle, &mut self.sim_restore_quiet_at, now) {
+                SimRestoreAction::Complete | SimRestoreAction::Superseded => {
+                    self.pending_restore = None;
+                    return;
+                }
+                SimRestoreAction::Wait => return,
+                SimRestoreAction::Request => {}
             }
             if let Err(error) = self.client.send(&NmlCommand::SetMode(previous)) {
                 log::warn!("could not restore the simulated panel task mode: {error}");
@@ -554,7 +566,6 @@ impl NmlBackend {
             // The task may acknowledge and still refuse a mode switch. Keep
             // the request pending until a later status poll confirms it.
             self.pending_restore_at = now;
-            self.sim_restore_quiet_at = None;
             return;
         }
         if status.task.interp_state == linuxcnc_nml::InterpState::Idle && !status.motion.probing {
@@ -2250,6 +2261,25 @@ mod nc_containment_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simulated_restore_waits_for_quiet_and_confirmation_and_honors_new_selection() {
+        let t = Instant::now();
+        let mut quiet = None;
+        let (manual, mdi, auto) = (NmlTaskMode::Manual, NmlTaskMode::Mdi, NmlTaskMode::Auto);
+        assert_eq!(sim_restore_action(manual, mdi, Some(manual), false, &mut quiet, t), SimRestoreAction::Wait);
+        assert_eq!(sim_restore_action(manual, mdi, Some(manual), true, &mut quiet, t), SimRestoreAction::Wait);
+        assert_eq!(sim_restore_action(manual, mdi, Some(manual), true, &mut quiet, t + Duration::from_millis(399)), SimRestoreAction::Wait);
+        // A new jog cancels the quiet interval.
+        assert_eq!(sim_restore_action(manual, mdi, Some(manual), false, &mut quiet, t + Duration::from_millis(400)), SimRestoreAction::Wait);
+        assert_eq!(sim_restore_action(manual, mdi, Some(manual), true, &mut quiet, t + Duration::from_millis(500)), SimRestoreAction::Wait);
+        assert_eq!(sim_restore_action(manual, mdi, Some(manual), true, &mut quiet, t + Duration::from_millis(900)), SimRestoreAction::Request);
+        // A request is not a confirmation; if rejected, retry only after quiet.
+        assert_eq!(sim_restore_action(manual, mdi, Some(manual), true, &mut quiet, t + Duration::from_millis(901)), SimRestoreAction::Wait);
+        assert_eq!(sim_restore_action(manual, manual, Some(manual), true, &mut quiet, t + Duration::from_millis(902)), SimRestoreAction::Complete);
+        assert_eq!(sim_restore_action(manual, mdi, Some(auto), true, &mut quiet, t + Duration::from_millis(903)), SimRestoreAction::Superseded);
+        assert_eq!(sim_restore_action(manual, mdi, None, true, &mut quiet, t + Duration::from_millis(904)), SimRestoreAction::Wait);
+    }
     use linc_core::probe::ProbeParameters;
 
     #[test]

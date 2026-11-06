@@ -15,6 +15,10 @@ impl LincApp {
 
     pub(super) fn draw_panel_preview(&self, ui: &mut egui::Ui) {
         let panel = &self.snapshot.panel;
+        let lathe = self.profile.variant == MachineVariant::Lathe;
+        let sub_requested = self.profile.config.lathe.as_ref()
+            .and_then(|config| config.sub_spindle).unwrap_or(false);
+        let sub_spindle = second_spindle_enabled(lathe, sub_requested, self.profile.machine_ini.spindles);
         ui.horizontal_wrapped(|ui| {
             ui.heading(RichText::new("SIM PANEL").color(theme::FG));
             ui.label(RichText::new("SIMULATION PREVIEW").color(theme::WARNING));
@@ -97,15 +101,17 @@ impl LincApp {
                         ui.label(RichText::new("JOG INTERLOCK: RELEASE ALL AXIS KEYS")
                             .strong().color(theme::WARNING));
                     }
+                    if lathe && sub_requested && !sub_spindle {
+                        ui.label(RichText::new("SECOND SPINDLE: PROFILE AND INI DISAGREE")
+                            .strong().color(theme::WARNING));
+                    }
                     let icon_id = egui::Id::unique("embedded-panel-icons");
                     let mut icon_choices = ui.ctx().data_mut(|data| {
                         data.get_temp::<std::collections::BTreeMap<String, String>>(icon_id).unwrap_or_default()
                     });
                     if group == "ICONS" {
                         ui.label(RichText::new("PANEL ICONS").strong().color(theme::FG));
-                        let lathe = self.profile.variant == MachineVariant::Lathe;
-                        let sub = self.profile.config.lathe.as_ref().and_then(|config| config.sub_spindle).unwrap_or(false);
-                        for (_, keys) in panel_key_groups(lathe, sub) {
+                        for (_, keys) in panel_key_groups(lathe, sub_spindle) {
                             for &(label, name) in keys {
                                 let config = self.profile.config.simulation.panel_keys.iter().find(|key| key.name == name);
                                 if !key_in_machine(name, &self.profile.machine_ini.coordinates)
@@ -291,14 +297,6 @@ impl LincApp {
                     });
                     }
                     let mut key_rects = Vec::new();
-                    let lathe = self.profile.variant == MachineVariant::Lathe;
-                    let sub_spindle = self
-                        .profile
-                        .config
-                        .lathe
-                        .as_ref()
-                        .and_then(|config| config.sub_spindle)
-                        .unwrap_or(false);
                     if group == "JOG" {
                         for axis in self.profile.machine_ini.axes.iter().filter(|axis| axis.axis_type == "ANGULAR") {
                             let text = match self.profile.machine_ini.angular_jog_plan(&axis.name) {
@@ -691,6 +689,23 @@ mod tests {
     }
 
     #[test]
+    fn second_spindle_keys_require_both_the_lathe_option_and_two_ini_spindles() {
+        let ini = |count| linc_core::ini::MachineIni::parse(
+            std::path::Path::new("configs/lathe-sim.ini"),
+            &include_str!("../../../../configs/lathe-sim.ini")
+                .replace("SPINDLES = 2", &format!("SPINDLES = {count}")),
+        ).unwrap();
+        assert!(!second_spindle_enabled(true, true, ini(1).spindles));
+        assert!(!second_spindle_enabled(true, false, ini(2).spindles));
+        assert!(!second_spindle_enabled(false, true, ini(2).spindles));
+        assert!(second_spindle_enabled(true, true, ini(2).spindles));
+        let groups = panel_key_groups(true, second_spindle_enabled(true, true, ini(1).spindles));
+        assert!(!groups.iter().any(|(name, _)| *name == "SECOND SPINDLE"));
+        let groups = panel_key_groups(true, second_spindle_enabled(true, true, ini(2).spindles));
+        assert!(groups.iter().any(|(name, _)| *name == "SECOND SPINDLE"));
+    }
+
+    #[test]
     fn bundled_panel_icons_render_and_reuse_their_texture() {
         let ctx = egui::Context::default();
         for key in ["worklamp", "coolant", "air_blow", "spd_sp"] {
@@ -968,6 +983,9 @@ fn panel_svg(ctx: &egui::Context, key: &str, override_icon: Option<&str>) -> Opt
 }
 fn key_in_machine(name: &str, coordinates: &[String]) -> bool {
     jog_axis(name).is_none_or(|axis| coordinates.iter().any(|configured| configured == axis))
+}
+fn second_spindle_enabled(lathe: bool, requested: bool, configured_spindles: usize) -> bool {
+    lathe && requested && configured_spindles >= 2
 }
 fn jog_axis(name: &str) -> Option<&'static str> {
     match name {

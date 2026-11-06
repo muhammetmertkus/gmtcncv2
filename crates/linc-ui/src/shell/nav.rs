@@ -4,84 +4,135 @@
 use super::*;
 
 pub(super) fn draw_nav_icon(painter: &egui::Painter, rect: egui::Rect, page: Page, color: Color32) {
-    let s = egui::Stroke::new(1.5, color);
+    let s = egui::Stroke::new(1.4, color);
     let c = rect.center();
     match page {
         Page::Machine => {
-            painter.rect_stroke(rect.shrink(2.0), 3.0, s, StrokeKind::Inside);
-            painter.circle_stroke(c, 3.0, s);
-            painter.line_segment(
-                [
-                    egui::pos2(rect.left() + 2.0, c.y),
-                    egui::pos2(rect.right() - 2.0, c.y),
-                ],
-                s,
+            // 3 Eksenli CNC Portal & Spindle Gövdesi
+            let base_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 2.0, rect.bottom() - 4.5),
+                egui::pos2(rect.right() - 2.0, rect.bottom() - 1.0),
             );
-        }
-        Page::Program => {
-            painter.rect_stroke(
-                rect.shrink2(Vec2::new(2.0, 1.0)),
-                2.0,
-                s,
-                StrokeKind::Inside,
-            );
-            for offset in [-3.0, 0.0, 3.0] {
-                painter.line_segment(
-                    [
-                        egui::pos2(rect.left() + 5.0, c.y + offset),
-                        egui::pos2(rect.right() - 5.0, c.y + offset),
-                    ],
-                    s,
-                );
-            }
-        }
-        Page::Offsets => {
-            painter.circle_stroke(c, 7.0, s);
-            painter.line_segment(
-                [
-                    egui::pos2(c.x, rect.top() + 1.0),
-                    egui::pos2(c.x, rect.top() + 5.0),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(c.x, rect.bottom() - 5.0),
-                    egui::pos2(c.x, rect.bottom() - 1.0),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(rect.left() + 1.0, c.y),
-                    egui::pos2(rect.left() + 5.0, c.y),
-                ],
-                s,
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(rect.right() - 5.0, c.y),
-                    egui::pos2(rect.right() - 1.0, c.y),
-                ],
-                s,
-            );
-        }
-        Page::Tools => {
-            let points = [
-                egui::pos2(rect.left() + 2.0, c.y),
-                egui::pos2(rect.left() + 6.0, c.y),
-                egui::pos2(rect.left() + 8.0, rect.top() + 5.0),
-                egui::pos2(rect.left() + 11.0, rect.bottom() - 4.0),
-                egui::pos2(rect.left() + 14.0, c.y),
-                egui::pos2(rect.right() - 2.0, c.y),
+            painter.rect_stroke(base_rect, 1.0, s, StrokeKind::Inside);
+            let arch = [
+                egui::pos2(rect.left() + 3.5, rect.bottom() - 4.5),
+                egui::pos2(rect.left() + 3.5, rect.top() + 2.0),
+                egui::pos2(rect.right() - 3.5, rect.top() + 2.0),
+                egui::pos2(rect.right() - 3.5, rect.bottom() - 4.5),
             ];
-            for pair in points.windows(2) {
+            for pair in arch.windows(2) {
                 painter.line_segment([pair[0], pair[1]], s);
             }
+            painter.line_segment(
+                [egui::pos2(c.x, rect.top() + 2.0), egui::pos2(c.x, c.y + 1.5)],
+                egui::Stroke::new(1.8, color),
+            );
+            painter.circle_filled(egui::pos2(c.x, c.y + 2.5), 1.5, color);
+        }
+        Page::Program => {
+            // G-CODE Doküman Sayfası (Kıvrımlı Köşe) + 6 Dişli Endüstriyel Çark
+            let stroke = egui::Stroke::new(1.3, color);
+            let left = rect.left() + 2.0;
+            let right = rect.right() - 2.0;
+            let top = rect.top() + 1.0;
+            let bottom = rect.bottom() - 1.0;
+            let fold = 4.0;
+
+            // Sayfa dış çizgileri
+            let sheet_pts = [
+                egui::pos2(left, top),
+                egui::pos2(right - fold, top),
+                egui::pos2(right, top + fold),
+                egui::pos2(right, bottom - 5.5),
+            ];
+            for pair in sheet_pts.windows(2) {
+                painter.line_segment([pair[0], pair[1]], stroke);
+            }
+            painter.line_segment([egui::pos2(left, top), egui::pos2(left, bottom)], stroke);
+            painter.line_segment([egui::pos2(left, bottom), egui::pos2(right - 5.5, bottom)], stroke);
+
+            // Kıvrım üçgeni
+            painter.line_segment([egui::pos2(right - fold, top), egui::pos2(right - fold, top + fold)], stroke);
+            painter.line_segment([egui::pos2(right - fold, top + fold), egui::pos2(right, top + fold)], stroke);
+
+            // "G" Harfi
+            painter.text(
+                egui::pos2(left + 4.0, top + 5.0),
+                Align2::CENTER_CENTER,
+                "G",
+                FontId::proportional(theme::font_size(7.0)),
+                color,
+            );
+
+            // G-Kodu Satırları
+            painter.line_segment(
+                [egui::pos2(left + 2.0, bottom - 5.0), egui::pos2(left + 5.5, bottom - 5.0)],
+                egui::Stroke::new(0.9, color),
+            );
+            painter.line_segment(
+                [egui::pos2(left + 2.0, bottom - 3.0), egui::pos2(left + 4.5, bottom - 3.0)],
+                egui::Stroke::new(0.9, color),
+            );
+
+            // 6 Dişli Endüstriyel Makine Çarkı (Sağ Alt)
+            let gear_c = egui::pos2(right - 3.0, bottom - 3.0);
+            let gear_r = 3.5;
+            painter.circle_filled(gear_c, gear_r, theme::PANEL_RAISED);
+            painter.circle_stroke(gear_c, gear_r, stroke);
+            for i in 0..6 {
+                let angle = i as f32 * std::f32::consts::PI / 3.0 - std::f32::consts::FRAC_PI_2;
+                let (sin, cos) = angle.sin_cos();
+                let inner = egui::pos2(gear_c.x + cos * (gear_r - 0.4), gear_c.y + sin * (gear_r - 0.4));
+                let outer = egui::pos2(gear_c.x + cos * (gear_r + 1.2), gear_c.y + sin * (gear_r + 1.2));
+                painter.line_segment([inner, outer], egui::Stroke::new(1.2, color));
+            }
+            painter.circle_filled(gear_c, 1.3, theme::SURFACE);
+            painter.circle_stroke(gear_c, 1.3, egui::Stroke::new(0.7, color));
+        }
+        Page::Offsets => {
+            // Parça Sıfırı WCS Koordinat Hedefi (⊕)
+            painter.circle_stroke(c, 6.5, s);
+            painter.circle_filled(c, 1.8, color);
+            painter.line_segment([egui::pos2(c.x, rect.top() + 1.5), egui::pos2(c.x, rect.bottom() - 1.5)], s);
+            painter.line_segment([egui::pos2(rect.left() + 1.5, c.y), egui::pos2(rect.right() - 1.5, c.y)], s);
+        }
+        Page::Tools => {
+            // Helisel Parmak Freze Ucu (Fluted End Mill)
+            let shank_w = 4.0;
+            let cutter_w = 7.0;
+            let shank = egui::Rect::from_min_max(
+                egui::pos2(c.x - shank_w / 2.0, rect.top() + 1.5),
+                egui::pos2(c.x + shank_w / 2.0, c.y - 1.0),
+            );
+            let cutter = egui::Rect::from_min_max(
+                egui::pos2(c.x - cutter_w / 2.0, c.y - 1.0),
+                egui::pos2(c.x + cutter_w / 2.0, rect.bottom() - 1.5),
+            );
+            painter.rect_stroke(shank, 1.0, egui::Stroke::new(1.1, color), StrokeKind::Inside);
+            painter.rect_stroke(cutter, 1.0, egui::Stroke::new(1.1, color), StrokeKind::Inside);
+            painter.line_segment(
+                [egui::pos2(c.x - cutter_w / 2.0 + 1.0, c.y + 1.5), egui::pos2(c.x + cutter_w / 2.0 - 1.0, c.y + 3.5)],
+                egui::Stroke::new(1.0, color),
+            );
+            painter.line_segment(
+                [egui::pos2(c.x - cutter_w / 2.0 + 1.0, c.y + 4.5), egui::pos2(c.x + cutter_w / 2.0 - 1.0, c.y + 6.5)],
+                egui::Stroke::new(1.0, color),
+            );
         }
         Page::Diagnostics => {
-            painter.circle_stroke(c, 7.0, s);
-            painter.circle_filled(c, 2.0, color);
+            // Endüstriyel Osiloskop & Sayısal HAL Sinyal Analizörü
+            painter.rect_stroke(rect.shrink(1.5), 2.0, s, StrokeKind::Inside);
+            let wave_pts = [
+                egui::pos2(rect.left() + 3.5, c.y + 2.5),
+                egui::pos2(rect.left() + 6.5, c.y + 2.5),
+                egui::pos2(rect.left() + 6.5, c.y - 3.0),
+                egui::pos2(rect.left() + 11.5, c.y - 3.0),
+                egui::pos2(rect.left() + 11.5, c.y + 2.5),
+                egui::pos2(rect.right() - 3.5, c.y + 2.5),
+            ];
+            for pair in wave_pts.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.3, color));
+            }
         }
         Page::Help => {
             painter.text(

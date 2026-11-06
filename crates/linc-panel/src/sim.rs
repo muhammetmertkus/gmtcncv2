@@ -117,6 +117,8 @@ pub struct AngularSimSettings {
     pub units: String,
     pub increments: Vec<(String, f64)>,
     pub increment_index: usize,
+    /// The shipped sim5 HAL routes A to joint 3 and B to joint 4.
+    pub sim5_mapping: bool,
 }
 
 /// How far through its power-up sequence a simulated cabinet starts.
@@ -225,9 +227,12 @@ impl SimPanelState {
         }
         let max_speed = plans.iter().map(|plan| plan.max_speed).fold(f64::INFINITY, f64::min);
         let speed = plans.iter().map(|plan| plan.default_speed).fold(max_speed, f64::min);
+        let sim5_mapping = plans.len() == 2
+            && plans.iter().any(|plan| plan.axis == "A" && plan.joint == 3)
+            && plans.iter().any(|plan| plan.axis == "B" && plan.joint == 4);
         self.angular_jog = Some(AngularSimSettings {
             speed, default_speed: speed, max_speed, units: ini.angular_units.clone(),
-            increments: first.increments.clone(), increment_index: 0,
+            increments: first.increments.clone(), increment_index: 0, sim5_mapping,
         });
     }
 
@@ -489,8 +494,10 @@ pub struct SimControlState {
 struct WiringState {
     use_hal: bool,
     reader: Option<linc_hal::HalReader>,
+    browser: Option<linc_hal::browser::HalBrowser>,
     checked: Option<Instant>,
     disconnected: Option<u64>,
+    rotary_topology: bool,
 }
 
 impl SimControlState {
@@ -505,8 +512,10 @@ impl SimControlState {
             wiring: Mutex::new(WiringState {
                 use_hal,
                 reader: None,
+                browser: use_hal.then(|| linc_hal::browser::HalBrowser::spawn(Duration::from_secs(1))),
                 checked: None,
                 disconnected: if use_hal { None } else { Some(0) },
+                rotary_topology: false,
             }),
         }
     }
@@ -524,7 +533,14 @@ impl SimControlState {
             if wiring.reader.is_none() {
                 wiring.reader = linc_hal::HalReader::new_with_role("panel_embedded").ok();
             }
-            wiring.disconnected = wiring.reader.as_ref().map(disconnected_button_mask);
+            let snapshot = wiring.browser.as_ref().map(|browser| browser.snapshot());
+            wiring.disconnected = snapshot.as_ref()
+                .and_then(|snapshot| disconnected_button_inventory_if_fresh(snapshot));
+            let component = std::env::var("LINC_PANEL_COMPONENT").unwrap_or_else(|_| "cnc_panel".into());
+            wiring.rotary_topology = snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.available && snapshot.age_ms().is_some_and(|age| age <= 3000)
+                    && sim5_rotary_topology_verified(snapshot, &component)
+            });
             wiring.checked = Some(Instant::now());
         }
         wiring.disconnected.map(|mask| pressed_button_names(mask))
@@ -536,11 +552,10 @@ impl SimControlState {
         let rotary_wired = {
             let wiring = self.wiring.lock().unwrap_or_else(|poison| poison.into_inner());
             let component = std::env::var("LINC_PANEL_COMPONENT").unwrap_or_else(|_| "cnc_panel".into());
-            wiring.use_hal && wiring.reader.as_ref().is_some_and(|hal| {
+            wiring.use_hal && state.angular_jog.as_ref().is_some_and(|settings| settings.sim5_mapping)
+                && wiring.reader.as_ref().is_some_and(|hal| {
                 hal.bit(&format!("{component}.sim_angular_ready")) == Some(true)
-                    && ["sim_angular_speed", "sim_angular_increment", "sim_angular_select",
-                        "jog_ap", "jog_an", "jog_bp", "jog_bn"]
-                        .iter().all(|name| hal.connected(&format!("{component}.{name}")) == Some(true))
+                    && wiring.rotary_topology
             })
         };
         json!({
@@ -957,14 +972,9 @@ pub fn simulator_window(
     face: PanelFace,
     shutdown: Arc<AtomicBool>,
 ) -> eframe::Result<()> {
-    // Connectivity is only meaningful while this process is inside a HAL.
-    // Without one (standalone --no-hal simulation) no key is greyed: every
-    // pin is equally unwired, so greying all of them would say nothing.
-    let hal = if hal_available {
-        linc_hal::HalReader::new().ok()
-    } else {
-        None
-    };
+    // The same read-only inventory used by the embedded panel. With --no-hal
+    // the controls remain a self-contained simulator rather than a HAL view.
+    let browser = hal_available.then(|| linc_hal::browser::HalBrowser::spawn(Duration::from_secs(1)));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
@@ -977,7 +987,7 @@ pub fn simulator_window(
         options,
         Box::new(move |cc| {
             Ok(Box::new(SimPanelApp::new(
-                cc, handle, scale, probe_key, hal, face, shutdown,
+                cc, handle, scale, probe_key, browser, face, shutdown,
             )))
         }),
     )
@@ -1001,11 +1011,12 @@ struct SimPanelApp {
     power_pulse: Option<(bool, Instant)>,
     /// Show the simulation-only PROBE CONTACT debug key (--probe-key).
     probe_key: bool,
-    /// Read-only HAL view used to tell which keys are wired to a signal.
-    hal: Option<linc_hal::HalReader>,
-    /// Buttons whose cnc_panel pin carries no HAL signal.
+    /// Background read-only inventory. None means standalone --no-hal mode.
+    browser: Option<linc_hal::browser::HalBrowser>,
+    /// Buttons without a verified immediate HAL reader.
     disconnected: u64,
-    hal_checked: Instant,
+    last_inventory: Option<Arc<linc_hal::browser::HalSnapshot>>,
+    inventory_mask: u64,
     last_frame: Instant,
     /// Which panel this window draws, from the profile.
     face: PanelFace,
@@ -1018,7 +1029,7 @@ impl SimPanelApp {
         handle: SimPanelHandle,
         scale: f32,
         probe_key: bool,
-        hal: Option<linc_hal::HalReader>,
+        browser: Option<linc_hal::browser::HalBrowser>,
         face: PanelFace,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
@@ -1032,9 +1043,10 @@ impl SimPanelApp {
             holds: HoldTracker::default(),
             power_pulse: None,
             probe_key,
-            hal,
-            disconnected: 0,
-            hal_checked: Instant::now(),
+            disconnected: if browser.is_some() { all_panel_buttons() } else { 0 },
+            last_inventory: None,
+            inventory_mask: all_panel_buttons(),
+            browser,
             last_frame: Instant::now(),
             face,
             shutdown,
@@ -1086,13 +1098,29 @@ impl eframe::App for SimPanelApp {
                 self.power_pulse = None;
             }
         }
-        // Connectivity is refreshed once a second: the HAL nets are wired
-        // after this window starts (loadusr blocks net creation), so reading
-        // once at startup would grey nothing or everything at random.
-        if let Some(hal) = &self.hal {
-            if self.hal_checked.elapsed() >= Duration::from_millis(1000) {
-                self.disconnected = disconnected_button_mask(hal);
-                self.hal_checked = Instant::now();
+        // A missing, failed or stale inventory fails closed; a fresh poll
+        // automatically picks up late connections and later disconnections.
+        if let Some(browser) = &self.browser {
+            let snapshot = browser.snapshot();
+            if !snapshot.available || snapshot.age_ms().is_none_or(|age| age > 3000) {
+                self.disconnected = all_panel_buttons();
+            } else {
+                let changed = self.last_inventory.as_ref().is_none_or(|last| !Arc::ptr_eq(last, &snapshot));
+                if changed {
+                    self.inventory_mask = disconnected_button_inventory_mask(&snapshot);
+                    if let Some(angular) = self.handle.snapshot().angular_jog {
+                        let component = std::env::var("LINC_PANEL_COMPONENT").unwrap_or_else(|_| "cnc_panel".into());
+                        let ready_pin = format!("{component}.sim_angular_ready");
+                        let ready = snapshot.pins.iter().any(|pin| pin.name == ready_pin
+                            && pin.ty == "bit" && pin.value == "TRUE");
+                        if !angular.sim5_mapping || !ready || !sim5_rotary_topology_verified(&snapshot, &component) {
+                            self.inventory_mask |= buttons::JOG_AP | buttons::JOG_AN
+                                | buttons::JOG_BP | buttons::JOG_BN | buttons::JOG_CP | buttons::JOG_CN;
+                        }
+                    }
+                    self.last_inventory = Some(snapshot);
+                }
+                self.disconnected = self.inventory_mask;
             }
         }
         self.last_frame = Instant::now();
@@ -1586,11 +1614,14 @@ impl HoldTracker {
 
     /// Fold this frame's input events into the hold state. `rects` are the
     /// momentary key rects in screen coordinates.
-    fn process(&mut self, ui: &egui::Ui, rects: &[(u64, Rect)]) {
+    fn process(&mut self, ui: &egui::Ui, rects: &[(u64, Rect)], disconnected: u64) {
+        // Forget held keys which lose their verified connection. Reconnecting
+        // while a pointer remains down must not start them unexpectedly.
+        self.holds.retain(|(_, mask)| *mask == PROBE_HOLD || *mask & disconnected == 0);
         let hit = |pos: Pos2| {
             rects
                 .iter()
-                .find(|(_, rect)| rect.contains(pos))
+                .find(|(mask, rect)| (*mask == PROBE_HOLD || *mask & disconnected == 0) && rect.contains(pos))
                 .map(|(mask, _)| *mask)
         };
         ui.input(|input| {
@@ -1902,23 +1933,85 @@ fn paint_key_arrow(
 
 /// The cap of a compact black legend key: face, thin dark border, top edge
 /// highlight and the green LED dot.
-/// True when this key's cnc_panel pin carries no HAL signal.
+/// True when this key is unavailable according to the latest wiring check.
 fn key_disabled(disconnected: u64, mask: u64) -> bool {
     disconnected & mask != 0
 }
 
-/// Buttons whose pin exists but is attached to no signal.
-fn disconnected_button_mask(hal: &linc_hal::HalReader) -> u64 {
-    let component =
-        std::env::var("LINC_PANEL_COMPONENT").unwrap_or_else(|_| "cnc_panel".to_string());
-    let mut mask = 0;
-    for (name, bit) in crate::BUTTON_PINS {
-        let pin = format!("{component}.{name}");
-        if hal.connected(&pin) == Some(false) {
-            mask |= bit;
+/// An immediate compatible reader is necessary, but does not prove the full
+/// signal chain or the physical machine behavior.
+fn disconnected_button_inventory_mask(snapshot: &linc_hal::browser::HalSnapshot) -> u64 {
+    let component = std::env::var("LINC_PANEL_COMPONENT").unwrap_or_else(|_| "cnc_panel".to_string());
+    crate::BUTTON_PINS.iter().fold(0, |mask, (name, bit)| {
+        if snapshot.output_has_reader(&format!("{component}.{name}"), "bit") == Some(true) {
+            mask
+        } else {
+            mask | bit
+        }
+    })
+}
+
+fn all_panel_buttons() -> u64 {
+    crate::BUTTON_PINS.iter().fold(0, |mask, (_, bit)| mask | bit)
+}
+
+fn disconnected_button_inventory_if_fresh(snapshot: &linc_hal::browser::HalSnapshot) -> Option<u64> {
+    (snapshot.available && snapshot.age_ms().is_some_and(|age| age <= 3000))
+        .then(|| disconnected_button_inventory_mask(snapshot))
+}
+
+/// Check the explicitly shipped XYZAB simulator wiring, not arbitrary HAL
+/// graphs. Every edge must match; this does not verify realtime execution,
+/// axis limits, component internals, or actual physical machine behavior.
+fn sim5_rotary_topology_verified(snapshot: &linc_hal::browser::HalSnapshot, component: &str) -> bool {
+    let linked = |from: &str, to: &str, ty: &str| {
+        snapshot.output_connected_to(from, to, ty) == Some(true)
+    };
+    for (from, to, ty) in [
+        (format!("{component}.sim_angular_speed"), "sim5.speed.in1", "float"),
+        (format!("{component}.sim_angular_select"), "sim5.speed.sel", "bit"),
+        ("linc.jog-speed".into(), "sim5.speed.in0", "float"),
+        ("sim5.speed.out".into(), "halui.axis.jog-speed", "float"),
+        ("sim5.speed.out".into(), "halui.joint.jog-speed", "float"),
+        ("sim5.ready.and".into(), "cnc_panel.sim_angular_ready", "bit"),
+    ] {
+        let target = if to == "cnc_panel.sim_angular_ready" {
+            format!("{component}.sim_angular_ready")
+        } else { to.to_owned() };
+        if !linked(&from, &target, ty) { return false; }
+    }
+    let increment = format!("{component}.sim_angular_increment");
+    for target in ["halui.axis.a.increment", "halui.axis.b.increment",
+        "halui.joint.3.increment", "halui.joint.4.increment"] {
+        if !linked(&increment, target, "float") { return false; }
+    }
+    for (key, axis, joint, direction) in [
+        ("ap", "a", 3, "plus"), ("an", "a", 3, "minus"),
+        ("bp", "b", 4, "plus"), ("bn", "b", 4, "minus"),
+    ] {
+        let source = format!("{component}.jog_{key}");
+        for (suffix, is_axis, is_step) in [
+            ("axis", true, false), ("joint", false, false),
+            ("step_axis", true, true), ("step_joint", false, true),
+        ] {
+            let gate = format!("sim5.{key}_{suffix}");
+            let command = if is_step { format!("increment-{direction}") } else { direction.into() };
+            let target = if is_axis { format!("halui.axis.{axis}.{command}") }
+                else { format!("halui.joint.{joint}.{command}") };
+            let mode = if is_step { "mode_inc" } else { "mode_jog" };
+            let coordinate_mode = if is_axis { "halui.mode.is-teleop" } else { "not.is_joint.out" };
+            for (from, to) in [
+                (source.clone(), format!("{gate}.in-00")),
+                (format!("{component}.{mode}"), format!("{gate}.in-01")),
+                (coordinate_mode.into(), format!("{gate}.in-02")),
+                ("sim5.ready.and".into(), format!("{gate}.in-03")),
+                (format!("{gate}.and"), target),
+            ] {
+                if !linked(&from, &to, "bit") { return false; }
+            }
         }
     }
-    mask
+    true
 }
 
 fn paint_key_cap(
@@ -2662,7 +2755,12 @@ fn paint_panel(
     // Match this frame's input events against the momentary key rects BEFORE
     // painting, so the state published and the caps drawn this frame already
     // include the newest press or release.
-    holds.process(ui, &it.momentary);
+    holds.process(ui, &it.momentary, disconnected);
+    let release = *pressed & disconnected;
+    if release != 0 {
+        handle.set(|state| state.set_button(release, false));
+        *pressed &= !release;
+    }
 
     let painter = ui.painter();
     painter.rect_filled(ui.max_rect(), 0.0, SURROUND);
@@ -3097,7 +3195,7 @@ fn paint_panel(
         Color32::from_rgb(0xf5, 0xf4, 0xee),
         Color32::from_rgb(0xbd, 0xbb, 0xb3),
         "cycle-start",
-    ) {
+    ) && !key_disabled(disconnected, buttons::CYCLE_START) {
         handle.set(|s| s.set_button(buttons::CYCLE_START, true));
         *pressed |= buttons::CYCLE_START;
     }
@@ -3110,7 +3208,7 @@ fn paint_panel(
         Color32::from_rgb(0x2c, 0x2f, 0x32),
         Color32::from_rgb(0x0e, 0x10, 0x11),
         "cycle-stop",
-    ) {
+    ) && !key_disabled(disconnected, buttons::CYCLE_STOP) {
         handle.set(|s| s.set_button(buttons::CYCLE_STOP, true));
         *pressed |= buttons::CYCLE_STOP;
     }
@@ -3235,15 +3333,15 @@ fn paint_panel(
             }
         });
     }
-    if ui.input(|input| input.key_pressed(egui::Key::R)) {
+    if !key_disabled(disconnected, buttons::RAPID) && ui.input(|input| input.key_pressed(egui::Key::R)) {
         handle.set(|state| state.set_button(buttons::RAPID, true));
         *pressed |= buttons::RAPID;
     }
-    if ui.input(|input| input.key_pressed(egui::Key::C)) {
+    if !key_disabled(disconnected, buttons::CYCLE_START) && ui.input(|input| input.key_pressed(egui::Key::C)) {
         handle.set(|state| state.set_button(buttons::CYCLE_START, true));
         *pressed |= buttons::CYCLE_START;
     }
-    if ui.input(|input| input.key_pressed(egui::Key::S)) {
+    if !key_disabled(disconnected, buttons::CYCLE_STOP) && ui.input(|input| input.key_pressed(egui::Key::S)) {
         handle.set(|state| state.set_button(buttons::CYCLE_STOP, true));
         *pressed |= buttons::CYCLE_STOP;
     }
@@ -3311,6 +3409,17 @@ mod tests {
         assert!(key_disabled(disconnected, buttons::CHUCK));
         assert!(!key_disabled(disconnected, buttons::CYCLE_START));
         assert!(!key_disabled(0, buttons::K4));
+    }
+
+    #[test]
+    fn hal_inventory_rejects_missing_and_stale_snapshots() {
+        let mut snapshot = linc_hal::browser::HalSnapshot::default();
+        assert_eq!(disconnected_button_inventory_if_fresh(&snapshot), None);
+        snapshot.available = true;
+        snapshot.captured = Some(Instant::now() - Duration::from_secs(4));
+        assert_eq!(disconnected_button_inventory_if_fresh(&snapshot), None);
+        snapshot.captured = Some(Instant::now());
+        assert_eq!(disconnected_button_inventory_if_fresh(&snapshot), Some(all_panel_buttons()));
     }
 
     /// Every key mask one face draws, in painting order.
@@ -3619,6 +3728,7 @@ mod tests {
         ).unwrap();
         let handle = SimPanelHandle::new();
         handle.set(|state| state.configure_angular_jog(&ini));
+        assert!(handle.snapshot().angular_jog.as_ref().unwrap().sim5_mapping);
         let control = SimControlState::new(handle.clone());
         let initial = control.state();
         assert_eq!(initial["angular_jog"]["speed"], 36.0);
@@ -3647,6 +3757,10 @@ mod tests {
         broken.joint_jog[3].max_velocity = None;
         handle.set(|state| state.configure_angular_jog(&broken));
         assert!(handle.snapshot().angular_jog.is_none());
+        let mut swapped = ini.clone();
+        swapped.kinematics = "trivkins coordinates=XYZBA".into();
+        handle.set(|state| state.configure_angular_jog(&swapped));
+        assert!(!handle.snapshot().angular_jog.as_ref().unwrap().sim5_mapping);
     }
 
     #[test]
@@ -3801,6 +3915,7 @@ mod tests {
         power_pulse: Option<(bool, Instant)>,
         probe_key: bool,
         face: PanelFace,
+        disconnected: u64,
         time: f64,
     }
 
@@ -3818,6 +3933,7 @@ mod tests {
                 power_pulse: None,
                 probe_key,
                 face,
+                disconnected: 0,
                 time: 0.0,
             }
         }
@@ -3848,7 +3964,7 @@ mod tests {
                             &mut self.holds,
                             &mut self.power_pulse,
                             probe_key,
-                            0,
+                            self.disconnected,
                         );
                     });
             });
@@ -3881,6 +3997,32 @@ mod tests {
             pos,
             force: None,
         }
+    }
+
+    #[test]
+    fn a_lost_connection_releases_a_held_key_without_resuming_on_reconnect() {
+        let mut fix = PanelFixture::new(false);
+        let pos = fix.momentary_rect(buttons::JOG_XP, false).center();
+        fix.frame(vec![touch_event(egui::TouchPhase::Start, 1, pos)]);
+        assert_ne!(fix.handle.snapshot().buttons & buttons::JOG_XP, 0);
+        fix.disconnected = buttons::JOG_XP;
+        fix.frame(vec![]);
+        assert_eq!(fix.handle.snapshot().buttons & buttons::JOG_XP, 0);
+        fix.disconnected = 0;
+        fix.frame(vec![touch_event(egui::TouchPhase::Move, 1, pos)]);
+        assert_eq!(fix.handle.snapshot().buttons & buttons::JOG_XP, 0);
+        fix.frame(vec![touch_event(egui::TouchPhase::End, 1, pos)]);
+        fix.frame(vec![touch_event(egui::TouchPhase::Start, 2, pos)]);
+        assert_ne!(fix.handle.snapshot().buttons & buttons::JOG_XP, 0);
+    }
+
+    #[test]
+    fn disconnected_key_cannot_be_pressed() {
+        let mut fix = PanelFixture::new(false);
+        fix.disconnected = buttons::JOG_XP;
+        let pos = fix.momentary_rect(buttons::JOG_XP, false).center();
+        fix.frame(vec![touch_event(egui::TouchPhase::Start, 1, pos)]);
+        assert_eq!(fix.handle.snapshot().buttons & buttons::JOG_XP, 0);
     }
 
     /// Mirrors egui-winit's touch translation: only the FIRST active touch is

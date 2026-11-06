@@ -67,6 +67,45 @@ impl Default for HalSnapshot {
 }
 
 impl HalSnapshot {
+    /// Whether an output pin has at least one compatible input on its signal.
+    /// This describes only the immediate signal, not the complete control path.
+    /// An unavailable or inconsistent inventory, or a missing/incompatible
+    /// pin, is unknown. Pin and signal listings are read separately, so both
+    /// must agree before reporting a connected path.
+    pub fn output_has_reader(&self, name: &str, expected_type: &str) -> Option<bool> {
+        if !self.available { return None; }
+        let source = self.pins.iter().find(|pin| pin.name == name)?;
+        if source.ty != expected_type || !matches!(source.dir.as_str(), "OUT" | "IO" | "I/O") {
+            return None;
+        }
+        let Some(signal) = source.signal.as_ref() else { return Some(false); };
+        let signal_row = self.signals.iter().find(|row| row.name == *signal)?;
+        if signal_row.ty != source.ty || !signal_row.pins.iter().any(|pin| pin == name) {
+            return None;
+        }
+        // Reject a mixed snapshot when pins were linked or unlinked between
+        // the two halcmd calls. A later poll can establish a consistent view.
+        let from_pins: Vec<_> = self.pins.iter().filter(|pin| pin.signal.as_ref() == Some(signal)).collect();
+        if from_pins.len() != signal_row.pins.len()
+            || from_pins.iter().any(|pin| pin.ty != source.ty || !signal_row.pins.contains(&pin.name)) {
+            return None;
+        }
+        Some(from_pins.iter().any(|pin| pin.name != name
+            && matches!(pin.dir.as_str(), "IN" | "IO" | "I/O")))
+    }
+
+    /// Whether a particular output and input share a consistently observed
+    /// signal. This proves one HAL link, not the component's behavior.
+    pub fn output_connected_to(&self, source: &str, target: &str, expected_type: &str) -> Option<bool> {
+        if source == target { return None; }
+        let has_reader = self.output_has_reader(source, expected_type)?;
+        let output = self.pins.iter().find(|pin| pin.name == source)?;
+        let input = self.pins.iter().find(|pin| pin.name == target)?;
+        if input.ty != expected_type || !matches!(input.dir.as_str(), "IN" | "IO" | "I/O") {
+            return None;
+        }
+        Some(has_reader && output.signal.is_some() && output.signal == input.signal)
+    }
     /// Milliseconds since the rows were read, for the staleness readout.
     pub fn age_ms(&self) -> Option<u64> {
         self.captured
@@ -335,6 +374,39 @@ bit TRUE axis-x-homed ==> cnc_panel.led_x <== halui.joint.0.is-homed
 bit FALSE bdt-button <== cnc_panel.bdt ==> toggle.bdt.in
 float 12.5 spindle-pos <== spindle.0.speed-out
 ";
+
+    #[test]
+    fn output_connection_requires_a_same_signal_compatible_reader() {
+        let pins = "panel bit OUT FALSE panel.button ==> button\n\
+                    other bit IN FALSE other.input <== button\n\
+                    panel bit OUT FALSE panel.orphan ==> orphan\n\
+                    panel bit OUT FALSE panel.free\n";
+        let signals = "bit FALSE button <== panel.button ==> other.input\n\
+                       bit FALSE orphan <== panel.orphan\n";
+        let snapshot = HalSnapshot::from_output(pins, signals);
+        assert_eq!(snapshot.output_has_reader("panel.button", "bit"), Some(true));
+        assert_eq!(snapshot.output_has_reader("panel.orphan", "bit"), Some(false));
+        assert_eq!(snapshot.output_has_reader("panel.free", "bit"), Some(false));
+        assert_eq!(snapshot.output_has_reader("other.input", "bit"), None);
+        assert_eq!(snapshot.output_has_reader("panel.button", "float"), None);
+        assert_eq!(snapshot.output_has_reader("panel.missing", "bit"), None);
+        assert_eq!(HalSnapshot::default().output_has_reader("panel.button", "bit"), None);
+        assert_eq!(snapshot.output_connected_to("panel.button", "other.input", "bit"), Some(true));
+        assert_eq!(snapshot.output_connected_to("panel.orphan", "other.input", "bit"), Some(false));
+        assert_eq!(snapshot.output_connected_to("panel.button", "panel.orphan", "bit"), None);
+        assert_eq!(snapshot.output_connected_to("panel.button", "missing.input", "bit"), None);
+        assert_eq!(snapshot.output_connected_to("panel.button", "panel.button", "bit"), None);
+        // A connection changed between the pin and signal inventory reads.
+        let missing_reader = HalSnapshot::from_output(pins,
+            "bit FALSE button <== panel.button\nbit FALSE orphan <== panel.orphan\n");
+        assert_eq!(missing_reader.output_has_reader("panel.button", "bit"), None);
+        let missing_source = HalSnapshot::from_output(pins,
+            "bit FALSE button ==> other.input\nbit FALSE orphan <== panel.orphan\n");
+        assert_eq!(missing_source.output_has_reader("panel.button", "bit"), None);
+        let wrong_type = HalSnapshot::from_output(pins,
+            "float 0 button <== panel.button ==> other.input\n");
+        assert_eq!(wrong_type.output_has_reader("panel.button", "bit"), None);
+    }
 
     #[test]
     fn pins_keep_owner_type_direction_value_and_signal() {

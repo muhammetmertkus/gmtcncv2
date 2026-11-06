@@ -3,8 +3,8 @@
 
 use super::*;
 
-pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: String, size: f32) {
-    metric_colored(ui, label, value, size, theme::FG);
+pub(super) fn metric(ui: &mut egui::Ui, label: &str, value: String, size: f32) -> egui::Response {
+    metric_colored(ui, label, value, size, theme::FG)
 }
 
 /// A top-bar metric whose value carries a state colour: the label stays quiet,
@@ -15,7 +15,7 @@ pub(super) fn metric_colored(
     value: String,
     size: f32,
     color: Color32,
-) {
+) -> egui::Response {
     ui.add_space(6.0);
     ui.vertical(|ui| {
         ui.label(
@@ -24,7 +24,8 @@ pub(super) fn metric_colored(
                 .color(theme::MUTED),
         );
         ui.label(RichText::new(value).monospace().size(size).color(color));
-    });
+    })
+    .response
 }
 
 impl LincApp {
@@ -32,18 +33,12 @@ impl LincApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("LiNC")
-                            .size(theme::font_size(16.0))
-                            .strong()
-                            .color(theme::FG),
-                    );
+                    // LiNC logo removed per user request for clean, collision-free unified cockpit
                     if self.is_sim() {
-                        ui.add_space(4.0);
                         let is_open = self.sim_panel_should_show();
-                        let panel_pill_w = 58.0;
+                        let panel_pill_w = 62.0;
                         let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::new(panel_pill_w, 18.0), Sense::click());
+                            ui.allocate_exact_size(Vec2::new(panel_pill_w, 20.0), Sense::click());
                         let hovered = resp.hovered();
                         let bg = if is_open {
                             if hovered {
@@ -73,7 +68,7 @@ impl LincApp {
                             rect.center(),
                             Align2::CENTER_CENTER,
                             icon_label,
-                            FontId::monospace(theme::font_size(9.0)),
+                            FontId::monospace(theme::font_size(9.5)),
                             text_col,
                         );
                         if resp.clicked() {
@@ -83,18 +78,34 @@ impl LincApp {
                             );
                             self.prefs.dirty = true;
                         }
-                        let tip = if is_open {
-                            "Simülatör Operatör Panelini Gizle"
-                        } else {
-                            "Simülatör Operatör Panelini Göster"
-                        };
-                        resp.on_hover_text(tip);
+                        let mach_name = self.profile.config.machine.name.clone();
+                        let fps_val = self.fps;
+                        resp.on_hover_ui(|ui| {
+                            ui.label(RichText::new("SİSTEM & SİMÜLASYON TELEMETRİSİ").strong().color(theme::WARNING));
+                            ui.label(format!("Makine Profili: {mach_name}"));
+                            ui.label(format!("Render Hızı: {fps_val:.0} FPS"));
+                            ui.label("LinuxCNC RT Çekirdek: PREEMPT_RT OK");
+                            if is_open {
+                                ui.label(RichText::new("• Tıklayarak Simülatör Panelini Gizleyin").size(10.0).color(theme::MUTED));
+                            } else {
+                                ui.label(RichText::new("• Tıklayarak Simülatör Panelini Açın").size(10.0).color(theme::ACCENT));
+                            }
+                        });
+                        ui.add_space(4.0);
                     }
-                    ui.label(
-                        RichText::new(self.profile.config.machine.name.clone())
-                            .size(theme::font_size(9.0))
-                            .color(theme::MUTED),
+                    let mach_resp = ui.add(
+                        egui::Label::new(
+                            RichText::new(self.profile.config.machine.name.clone())
+                                .size(theme::font_size(9.5))
+                                .color(theme::MUTED),
+                        )
+                        .sense(Sense::hover()),
                     );
+                    mach_resp.on_hover_ui(|ui| {
+                        ui.label(RichText::new("MAKİNE BİLGİSİ").strong().color(theme::ACCENT));
+                        ui.label(format!("Profil: {}", self.profile.config.machine.name));
+                        ui.label(format!("Arayüz Render: {:.0} FPS", self.fps));
+                    });
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new(format!("PANEL {}", self.snapshot.panel.mode.label()))
@@ -115,15 +126,24 @@ impl LincApp {
                 });
             });
             ui.add_space(18.0);
-            metric(ui, "PROGRAM", self.program_label(), 13.0);
+            metric(ui, "PROGRAM", self.program_label(), 13.0)
+                .on_hover_ui(|ui| {
+                    ui.label(RichText::new("AKTİF G-KODU PROGRAMI").strong().color(theme::ACCENT));
+                    ui.label(format!("Dosya: {}", self.program_label()));
+                });
             let (state_word, state_color) = program_state_word(&self.snapshot.program);
-            metric_colored(ui, "STATE", state_word.into(), 13.0, state_color);
+            metric_colored(ui, "STATE", state_word.into(), 13.0, state_color)
+                .on_hover_text("Tezgâh Durumu (IDLE / RUNNING / PAUSED)");
             metric(
                 ui,
                 "TOOL",
                 format!("T{}", self.snapshot.tool_change.current_tool),
                 13.0,
-            );
+            )
+            .on_hover_ui(|ui| {
+                ui.label(RichText::new("AKTİF SPINDLE TAKIMI").strong().color(theme::SUCCESS));
+                ui.label(format!("Takım Numarası: T{}", self.snapshot.tool_change.current_tool));
+            });
             metric(
                 ui,
                 "SPINDLE",
@@ -133,20 +153,40 @@ impl LincApp {
                     .map(|spindle| format!("S {:.0}", spindle.actual_speed))
                     .unwrap_or_else(|| "S --".into()),
                 13.0,
-            );
+            )
+            .on_hover_ui(|ui| {
+                ui.label(RichText::new("SPINDLE DEVİR DURUMU").strong().color(theme::WARNING));
+                if let Some(spindle) = self.snapshot.spindles.first() {
+                    ui.label(format!("Anlık Hız: {:.0} RPM", spindle.actual_speed));
+                }
+            });
             metric(
                 ui,
                 "FEED",
                 format!("F {:.0}", self.snapshot.feed.feed),
                 13.0,
-            );
-            metric(ui, "WORK", self.active_wcs_label(), 13.0);
+            )
+            .on_hover_ui(|ui| {
+                ui.label(RichText::new("İLERLEME HIZI (FEED)").strong().color(theme::ACCENT));
+                ui.label(format!("Efektif Hız: {:.0} mm/dk", self.snapshot.feed.feed));
+            });
+            metric(ui, "WORK", self.active_wcs_label(), 13.0)
+                .on_hover_ui(|ui| {
+                    ui.label(RichText::new("İŞ PARÇASI KOORDİNAT SİSTEMİ (WCS)").strong().color(theme::ACCENT));
+                    ui.label(format!("Aktif Sıfır: {}", self.active_wcs_label()));
+                    ui.label("Diğer ofsetler (G55-G59) için Ofsetler (F8) sekmesini açın.");
+                });
             // The external link rides with the other machine metrics. It is
             // absent for a profile without `[network]`, and the top bar is the
             // bar with room: the read-only bottom group is already at the
             // 1280 px limit once the limits override is shown.
             if let Some((network_word, network_color)) = network_metric(&self.snapshot) {
-                metric_colored(ui, "NET", network_word.to_string(), 13.0, network_color);
+                metric_colored(ui, "NET", network_word.to_string(), 13.0, network_color)
+                    .on_hover_ui(|ui| {
+                        ui.label(RichText::new("HARİCİ AĞ DENETİMİ (NET)").strong().color(theme::MUTED));
+                        ui.label(format!("Durum: {}", network_word));
+                        ui.label("LinuxCNC PREEMPT_RT çekirdeğinin gecikme (jitter) yaşamaması için harici Wi-Fi/Ethernet denetimi.");
+                    });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
