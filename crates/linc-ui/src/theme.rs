@@ -12,6 +12,21 @@ pub const FG: Color32 = Color32::from_rgb(0xe8, 0xea, 0xed);
 pub const MUTED: Color32 = Color32::from_rgb(0x9a, 0xa0, 0xa6);
 pub const BORDER: Color32 = Color32::from_rgb(0x30, 0x35, 0x3a);
 pub const ACCENT: Color32 = Color32::from_rgb(0x4d, 0xa3, 0xff);
+
+// Modern Cockpit Theme Constants (matched 1:1 with HTML prototype)
+pub const COCKPIT_BG: Color32 = Color32::from_rgb(0x11, 0x16, 0x22);
+pub const COCKPIT_CARD: Color32 = Color32::from_rgb(0x17, 0x1f, 0x2e);
+pub const COCKPIT_CARD_HOVER: Color32 = Color32::from_rgb(0x1f, 0x2a, 0x3e);
+pub const COCKPIT_BORDER: Color32 = Color32::from_rgb(0x24, 0x30, 0x47);
+pub const COCKPIT_BORDER_ACTIVE: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
+pub const COCKPIT_TEXT_MAIN: Color32 = Color32::from_rgb(0xf1, 0xf5, 0xf9);
+pub const COCKPIT_TEXT_MUTED: Color32 = Color32::from_rgb(0x94, 0xa3, 0xb8);
+pub const COCKPIT_TEXT_DIM: Color32 = Color32::from_rgb(0x64, 0x74, 0x8b);
+pub const COCKPIT_CYAN: Color32 = Color32::from_rgb(0x06, 0xb6, 0xd4);
+pub const COCKPIT_AMBER: Color32 = Color32::from_rgb(0xf5, 0x9e, 0x0b);
+pub const COCKPIT_GREEN: Color32 = Color32::from_rgb(0x10, 0xb9, 0x81);
+pub const COCKPIT_RED: Color32 = Color32::from_rgb(0xef, 0x44, 0x44);
+pub const COCKPIT_BLUE: Color32 = Color32::from_rgb(0x3b, 0x82, 0xf6);
 /// Translucent selection band under a selected row or G-code line. Matches the
 /// tool table's band, so a selection reads the same in every list.
 pub const SELECTION_ALPHA: u8 = 34;

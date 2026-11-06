@@ -467,8 +467,9 @@ impl LincApp {
             .exact_size(theme::NAV_BAR_HEIGHT)
             .frame(
                 Frame::new()
-                    .fill(theme::SURFACE)
-                    .inner_margin(Margin::symmetric(10, 2)),
+                    .fill(theme::COCKPIT_BG)
+                    .stroke(Stroke::new(1.0, theme::COCKPIT_BORDER))
+                    .inner_margin(Margin::symmetric(10, 4)),
             )
             .show(ui, |ui| self.draw_nav(ui));
         self.note_region("nav", nav.response.rect);
@@ -476,8 +477,9 @@ impl LincApp {
             .exact_size(theme::TOP_BAR_HEIGHT)
             .frame(
                 Frame::new()
-                    .fill(theme::SURFACE)
-                    .inner_margin(Margin::symmetric(16, 8)),
+                    .fill(theme::COCKPIT_BG)
+                    .stroke(Stroke::new(1.0, theme::COCKPIT_BORDER))
+                    .inner_margin(Margin::symmetric(12, 4)),
             )
             .show(ui, |ui| self.top_bar(ui));
         self.note_region("top-bar", top_bar.response.rect);
